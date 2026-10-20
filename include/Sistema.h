@@ -14,6 +14,7 @@ private:
     float entropia;
     float informacionMutua;
     float divergenciaKL;
+    float varianzaCodificacion;
 
 public:
     Sistema(int bits, std::string tipoFuente, std::string codificacion);

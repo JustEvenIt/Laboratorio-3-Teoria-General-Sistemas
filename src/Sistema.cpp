@@ -19,6 +19,7 @@ void Sistema::calcularMetricas(const unordered_map<string, float>& probabilidade
     entropia = 0.0;
     float probUniforme = 1.0 / probabilidades.size(); 
     divergenciaKL = 0.0;
+
     /*Calculo de la entropia y divergencia*/
     for (auto const& par : probabilidades) {
         float p = par.second;
@@ -40,7 +41,7 @@ void Sistema::calcularMetricas(const unordered_map<string, float>& probabilidade
     }
 
     // Paso B: Calcular la varianza con la fórmula de la sumatoria
-    varianzaCodificacion = 0.0;
+    varianzaCodificacion = 0.0f;
     for (auto const& par : probabilidades) {
         float p = par.second;
         float l_k = (float)(par.first.length() * 8);

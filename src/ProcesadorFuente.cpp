@@ -14,6 +14,7 @@ vector<string> ProcesadorFuente::fragmentarArchivo(const string& rutaArchivo, in
     if (!archivo.is_open()) return fragmentos;
 
     vector<char> buffer(nBytes);
+
     while (archivo.read(buffer.data(), nBytes)) {
         fragmentos.push_back(string(buffer.data(), nBytes));
     }
@@ -21,7 +22,8 @@ vector<string> ProcesadorFuente::fragmentarArchivo(const string& rutaArchivo, in
     if (archivo.gcount() > 0) {
         int bytesLeidos = archivo.gcount();
         string ultimoBloque(buffer.data(), bytesLeidos);
-        ultimoBloque.append(nBytes - bytesLeidos, '\0'); 
+        // Para que nuestra varainza de diferente de 0 tenemos que comentar esta linea que autocompelta con 0
+        //ultimoBloque.append(nBytes - bytesLeidos, '\0'); 
         fragmentos.push_back(ultimoBloque);
     }
 

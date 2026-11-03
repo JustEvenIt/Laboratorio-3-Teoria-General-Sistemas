@@ -1,0 +1,6 @@
+[server]
+# Permite subir audio de varios minutos y video de 5 minutos o más (MB)
+maxUploadSize = 4096
+
+[browser]
+gatherUsageStats = false

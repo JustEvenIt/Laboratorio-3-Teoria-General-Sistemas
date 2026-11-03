@@ -1,131 +1,476 @@
-import streamlit as st
+import json
+import shutil
 import subprocess
-import os
-import re
+from pathlib import Path
 
-st.set_page_config(page_title="Codificador 5G/6G - LZW", layout="centered")
+import altair as alt
+import pandas as pd
+import streamlit as st
 
-st.title("📡 Sistema de Codificación 5G/6G")
-st.markdown("Sube un archivo para analizar su entropía, comprimirlo usando LZW y verificar su reconstrucción.")
+RAIZ = Path(__file__).resolve().parent
+EJECUTABLE = RAIZ / "codificador_6g.exe"
+DATA = RAIZ / "data"
+SALIDA = DATA / "salida"
+VALORES_N = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+METODOS = {
+    "auto": "Adaptable (elige el de menor tamaño)",
+    "uniforme": "Uniforme (longitud fija)",
+    "huffman": "Huffman (no uniforme, mínima varianza)",
+    "lzw": "LZW (diccionario adaptable)",
+}
+COLOR = "#2a78d6"
 
-# 1. Controles de la Interfaz
-archivo_subido = st.file_uploader("Selecciona un archivo multimedia o de texto")
-n_bits = st.selectbox("Tamaño de bloque (N bits)", [8, 64, 128, 512, 1024, 2048, 4096, 8192])
+st.set_page_config(page_title="Codificador 5G/6G", page_icon="📡", layout="wide")
 
-if st.button("Procesar Archivo"):
-    if archivo_subido is not None:
-        # Asegurar que exista la carpeta data/
-        os.makedirs("data", exist_ok=True)
-        ruta_guardado = os.path.join("data", archivo_subido.name)
-        
-        with open(ruta_guardado, "wb") as f:
-            f.write(archivo_subido.getbuffer())
-        
-        st.info(f"Procesando {archivo_subido.name} con bloques de {n_bits} bits...")
 
-        # 2. Conectar la Interfaz con el código C++ de forma segura
-        ruta_ejecutable = os.path.join(os.getcwd(), "codificador_6g.exe")
+# ---------------------------------------------------------------- utilidades
 
-        # Validar si el archivo ejecutable realmente existe antes de correrlo
-        if not os.path.exists(ruta_ejecutable):
-            st.error(f"No se encontró el archivo ejecutable en: {ruta_ejecutable}. Asegúrate de compilarlo primero en la terminal.")
-        else:
-            comando = [ruta_ejecutable, ruta_guardado, str(n_bits)]
-            
-            # Ejecutamos con text=False para capturar los bytes en crudo
-            resultado = subprocess.run(comando, capture_output=True, text=False)
+def tam(b):
+    for unidad in ["bytes", "KB", "MB", "GB"]:
+        if b < 1024 or unidad == "GB":
+            return f"{b:,.0f} {unidad}" if unidad == "bytes" else f"{b:,.2f} {unidad}"
+        b /= 1024
 
-            # Decodificamos de forma segura ignorando caracteres binarios conflictivos
-            stdout_texto = resultado.stdout.decode('utf-8', errors='ignore') if resultado.stdout else ""
-            stderr_texto = resultado.stderr.decode('utf-8', errors='ignore') if resultado.stderr else ""
 
-            # 3. Mostrar los resultados de forma estructurada y limpia
-            if resultado.returncode == 0:
-                st.success("¡Procesamiento y compresión exitosos!")
-                
-                # Organizar la salida visualmente en pestañas
-                tab1, tab2 = st.tabs(["📊 Métricas y Resumen", "🔍 Traza Paso a Paso (LZW)"])
-                
-                with tab1:
-                    st.subheader("📊 Métricas Principales del Sistema")
-                    
-                    # Extraer valores numéricos de la salida de C++ mediante expresiones regulares
-                    match_h = re.search(r"Entropia \(H\):\s*([0-9.]+)", stdout_texto)
-                    match_kl = re.search(r"Divergencia KL:\s*([0-9.]+)", stdout_texto)
-                    match_var = re.search(r"Varianza de Codificacion \(sigma\^2\):\s*([0-9.e+]+)", stdout_texto)
-                    
-                    val_h = match_h.group(1) if match_h else "N/A"
-                    val_kl = match_kl.group(1) if match_kl else "N/A"
-                    
-                    # Formato compacto para evitar que el número largo se corte en la tarjeta
-                    if match_var:
-                        try:
-                            val_var_float = float(match_var.group(1))
-                            if val_var_float >= 1e6:
-                                val_var_fmt = f"{val_var_float/1e6:.2f} M"
-                            elif val_var_float >= 1e3:
-                                val_var_fmt = f"{val_var_float/1e3:.1f} k"
-                            else:
-                                val_var_fmt = f"{val_var_float:.1f}"
-                        except:
-                            val_var_fmt = match_var.group(1)
-                    else:
-                        val_var_fmt = "N/A"
+def num(x, d=4):
+    return "N/A" if x is None else f"{x:,.{d}f}"
 
-                    # Mostrar métricas en columnas con tarjetas visuales de Streamlit
-                    col_m1, col_m2, col_m3 = st.columns(3)
-                    col_m1.metric("Entropía (H)", f"{val_h} bits")
-                    col_m2.metric("Divergencia KL", f"{val_kl}")
-                    col_m3.metric("Varianza (σ²)", val_var_fmt, "bits²")
 
-                    st.markdown("---")
-                    
-                    # Mostrar resumen de compresión
-                    if os.path.exists("data/comprimido.bin"):
-                        tam_comp = os.path.getsize("data/comprimido.bin")
-                        tam_orig = len(archivo_subido.getvalue())
-                        
-                        col_c1, col_c2 = st.columns(2)
-                        col_c1.metric("Tamaño Original", f"{tam_orig} bytes")
-                        
-                        porcentaje_reduccion = f"-{((1 - tam_comp/tam_orig)*100):.1f}%" if tam_orig > 0 else None
-                        col_c2.metric("Tamaño Comprimido", f"{tam_comp} bytes", 
-                                      delta=porcentaje_reduccion,
-                                      delta_color="inverse")
+def compilar_si_hace_falta():
+    """Compila el núcleo C++ si no existe o si algún fuente es más reciente."""
+    fuentes = list((RAIZ / "src").glob("*.cpp")) + list((RAIZ / "include").glob("*.h"))
+    if EJECUTABLE.exists() and EJECUTABLE.stat().st_mtime >= max(f.stat().st_mtime for f in fuentes):
+        return True
+    if shutil.which("g++") is None:
+        st.error("No se encontró `g++` para compilar el núcleo C++. Instálalo (MinGW en Windows) o compila manualmente:\n\n"
+                 "`g++ -O2 -std=c++17 src/*.cpp -o codificador_6g.exe`")
+        return False
+    with st.spinner("Compilando el núcleo C++..."):
+        cmd = ["g++", "-O2", "-std=c++17", *[str(f) for f in sorted((RAIZ / "src").glob("*.cpp"))], "-o", str(EJECUTABLE)]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        st.error("Error al compilar el núcleo C++")
+        st.code(r.stderr[-5000:])
+        return False
+    return True
 
-                    # Consola completa oculta en un desplegable para mantener la interfaz limpia
-                    with st.expander("Ver salida completa del núcleo C++"):
-                        st.text_area("Consola", stdout_texto, height=200, label_visibility="collapsed")
-                
-                with tab2:
-                    st.subheader("Proceso iterativo del diccionario LZW")
-                    st.markdown("Registro paso a paso de cómo el compresor detectó patrones y generó códigos dinámicos:")
-                    
-                    if stdout_texto:
-                        lineas_consola = stdout_texto.split("\n")
-                        pasos_lzw = [linea for linea in lineas_consola if "[LZW Paso]" in linea]
-                        
-                        if pasos_lzw:
-                            st.code("\n".join(pasos_lzw), language="text")
-                        else:
-                            st.info("No se encontraron registros '[LZW Paso]'. Asegúrate de haber vuelto a compilar tu código en C++.")
-                    else:
-                        st.warning("El núcleo de C++ no devolvió ninguna salida estándar.")
-                
-                # 4. Botones de descarga de archivos
-                st.markdown("---")
-                st.subheader("Archivos de Salida")
-                col1, col2 = st.columns(2)
-                
-                if os.path.exists("data/comprimido.bin"):
-                    with open("data/comprimido.bin", "rb") as file_comp:
-                        col1.download_button("📥 Descargar Comprimido (.bin)", file_comp, file_name="comprimido.bin")
-                
-                if os.path.exists("data/reconstruido.bin"):
-                    with open("data/reconstruido.bin", "rb") as file_rec:
-                        col2.download_button("🔄 Descargar Reconstruido", file_rec, file_name=f"reconstruido_{archivo_subido.name}")
-            else:
-                st.error("Ocurrió un error en el núcleo de C++.")
-                st.error(stderr_texto if stderr_texto else "Error desconocido sin mensaje de error estándar.")
+
+def ejecutar(args):
+    r = subprocess.run([str(EJECUTABLE), *args], capture_output=True, cwd=RAIZ)
+    return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+
+
+def grafico_barras(df, x, y, titulo_x, titulo_y, tooltip, orden_x=None):
+    base = alt.Chart(df).mark_bar(color=COLOR, cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+    chart = base.encode(
+        x=alt.X(f"{x}:N", title=titulo_x, sort=orden_x, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y(f"{y}:Q", title=titulo_y, axis=alt.Axis(grid=True, gridOpacity=0.3)),
+        tooltip=tooltip,
+    ).properties(height=260)
+    st.altair_chart(chart, width="stretch")
+
+
+def grafico_lineas(df, y, titulo_y, formato=".3f"):
+    base = alt.Chart(df).encode(
+        x=alt.X("n_bits:Q", title="N (bits/símbolo)", scale=alt.Scale(type="log", base=2),
+                axis=alt.Axis(values=VALORES_N, labelAngle=-45)),
+        y=alt.Y(f"{y}:Q", title=titulo_y, axis=alt.Axis(grid=True, gridOpacity=0.3)),
+        tooltip=[alt.Tooltip("n_bits:Q", title="N"), alt.Tooltip(f"{y}:Q", title=titulo_y, format=formato)],
+    )
+    chart = (base.mark_line(color=COLOR, strokeWidth=2) + base.mark_point(color=COLOR, filled=True, size=64)).properties(height=220)
+    st.altair_chart(chart, width="stretch")
+
+
+def marcar_diferencias(a, b):
+    return "".join("^" if x != y else " " for x, y in zip(a, b))
+
+
+def boton_descarga(ruta, etiqueta, nombre, clave):
+    ruta = Path(ruta) if ruta else None
+    if not ruta or not ruta.exists():
+        return
+    if ruta.stat().st_size > 512 * 1024 * 1024:
+        st.caption(f"{etiqueta}: archivo muy grande para descargar desde la página, está en `{ruta}`")
+        return
+    with open(ruta, "rb") as f:
+        st.download_button(etiqueta, f, file_name=nombre, key=clave, width="stretch")
+
+
+# ---------------------------------------------------------------- agente de IA (DQN con detección de cambios)
+
+METODOS_AGENTE = ["Uniforme", "Huffman", "LZW"]
+N_AGENTE = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+
+
+def seccion_agente(res):
+    st.subheader("Agente DQN: mejor codificación y N para el archivo")
+    if st.button("Ejecutar agente", type="primary"):
+        ruta = DATA / res["archivo"]
+        salida = SALIDA / f"agente_{Path(res['archivo']).stem}"
+        salida.mkdir(parents=True, exist_ok=True)
+        ruta_json = salida / "agente.json"
+        with st.spinner("El agente está recorriendo el archivo..."):
+            rc, out, err = ejecutar([str(ruta), "--agente", "--salida", str(salida), "--json", str(ruta_json)])
+        if rc != 0 or not ruta_json.exists():
+            st.error("El agente terminó con error" + (" (una reconstrucción no fue idéntica)" if rc == 4 else ""))
+            st.code(err or out)
+            return
+        st.session_state["agente"] = {"archivo": res["archivo"], "datos": json.loads(ruta_json.read_text(encoding="utf-8"))}
+
+    ag = st.session_state.get("agente")
+    if not ag or ag["archivo"] != res["archivo"]:
+        return
+    d = ag["datos"]
+    cfg, dec, apr, ver = d["configuracion"], d["decision"], d["aprendizaje"], d["verificacion"]
+    acciones = [a["nombre"] for a in d["acciones"]]
+
+    st.success(f"**{dec['metodo']} con N = {dec['n_bits']} bits**")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Tamaño", f"{tam(cfg['tamano'])} → {tam(dec['bytes_comprimido'])}")
+    m2.metric("Razón de compresión", f"{dec['razon']:.3f}:1")
+    m3.metric("L̄ / H(X)", f"{dec['longitud_media']:.3f} / {dec['entropia']:.3f}")
+    m4.metric("Varianza σ²", f"{dec['varianza']:.4f}")
+    m5.metric("Reconstrucción", "idéntica ✅" if dec["identico"] else "distinta ❌")
+
+    st.markdown(f"**Aprendizaje por bloques** · {cfg['pasos']:,} pasos sobre {cfg['bloques']:,} bloques de {cfg['bytes_bloque']:,} bytes · "
+                f"cambios detectados: {apr['alarmas']} · bloques con la mejor codificación: {apr['acierto_bloques'] * 100:.1f}%")
+    pasos_df = pd.DataFrame(d["pasos"])
+    dec_df = pasos_df.assign(Codificación=pasos_df["a"].map(dict(enumerate(acciones))),
+                             Método=pasos_df["a"].map(lambda a: d["acciones"][a]["metodo"]))
+    usadas = [a for a in acciones if a in set(dec_df["Codificación"])]
+    puntos = alt.Chart(dec_df).mark_tick(thickness=1.5, size=12).encode(
+        x=alt.X("t:Q", title="Paso"), y=alt.Y("Codificación:N", sort=usadas, title=None),
+        color=alt.Color("Método:N", scale=alt.Scale(domain=METODOS_AGENTE, range=["#8a8a8a", "#2a78d6", "#eb6834"]),
+                        legend=alt.Legend(orient="top", title=None)),
+        tooltip=[alt.Tooltip("t:Q", title="Paso"), alt.Tooltip("b:Q", title="Bloque"), "Codificación:N",
+                 alt.Tooltip("rw:Q", title="Bits ahorrados", format=".3f")])
+    alarmas = alt.Chart(pasos_df[pasos_df["al"]]).mark_rule(strokeDash=[4, 3], color="#52514e").encode(
+        x="t:Q", tooltip=[alt.Tooltip("t:Q", title="Cambio detectado")])
+    st.altair_chart((puntos + alarmas).properties(height=max(180, 16 * len(usadas))), width="stretch")
+
+    curvas = pd.DataFrame({"t": pasos_df["t"], "Agente": pasos_df["rw"].rolling(20, min_periods=1).mean(),
+                           "Mejor del bloque": pasos_df["rwo"].rolling(20, min_periods=1).mean()}).melt("t", var_name="Serie", value_name="Bits ahorrados")
+    st.altair_chart(alt.Chart(curvas).mark_line(strokeWidth=2).encode(
+        x=alt.X("t:Q", title="Paso"), y=alt.Y("Bits ahorrados:Q", axis=alt.Axis(grid=True, gridOpacity=0.3)),
+        color=alt.Color("Serie:N", scale=alt.Scale(domain=["Agente", "Mejor del bloque"], range=["#2a78d6", "#1baf7a"]),
+                        legend=alt.Legend(orient="top", title=None)),
+        tooltip=[alt.Tooltip("t:Q", title="Paso"), "Serie:N", alt.Tooltip("Bits ahorrados:Q", format=".3f")]).properties(height=220),
+        width="stretch")
+
+    st.markdown(f"**Codificaciones medidas sobre el archivo completo** ({dec['evaluaciones_archivo']} de 27)")
+    st.dataframe(pd.DataFrame([{
+        "Codificación": c["nombre"], "Origen": c["origen"], "Total (bytes)": c["total"], "Cabecera": c["cabecera"], "Datos": c["carga"],
+        "Razón": c["razon"], "H(X)": c["entropia"], "L̄": c["longitud_media"], "σ²": c["varianza"], "Elegida": "✅" if c["elegida"] else ""}
+        for c in sorted(d["evaluadas"], key=lambda c: c["total"])]), hide_index=True,
+        column_config={c: st.column_config.NumberColumn(format="%.4f") for c in ["Razón", "H(X)", "L̄", "σ²"]})
+
+    if ver["exhaustivo"]:
+        st.markdown("**Verificación: las 27 combinaciones sobre el archivo completo** · mejor: "
+                    f"{ver['mejor_real_nombre']} {'✅' if ver['acierto'] else f'(el agente quedó a {ver['diferencia'] * 100:.3f}%)'}")
+        todas = pd.DataFrame([{"Método": c["metodo"], "N": c["n_bits"], "Razón": c["razon"], "Total": c["total"], "Codificación": c["nombre"]}
+                              for c in ver["todas"]])
+        base = alt.Chart(todas).encode(
+            x=alt.X("N:O", title="N (bits por símbolo)", sort=N_AGENTE), y=alt.Y("Método:N", sort=METODOS_AGENTE, title=None),
+            tooltip=["Codificación:N", alt.Tooltip("Total:Q", title="Bytes", format=","), alt.Tooltip("Razón:Q", format=".3f")])
+        celdas = base.mark_rect(cornerRadius=3, stroke="#ffffff", strokeWidth=2).encode(
+            color=alt.Color("Razón:Q", title="Razón", scale=alt.Scale(scheme="blues")))
+        textos = base.mark_text(fontSize=11).encode(
+            text=alt.Text("Razón:Q", format=".2f"),
+            color=alt.condition(f"datum['Razón'] > {float(todas['Razón'].median())}", alt.value("#ffffff"), alt.value("#1f1f1f")))
+        marco = alt.Chart(todas[todas["Codificación"] == dec["nombre"]]).mark_rect(fill=None, stroke="#eb6834", strokeWidth=3).encode(
+            x=alt.X("N:O", sort=N_AGENTE), y=alt.Y("Método:N", sort=METODOS_AGENTE))
+        st.altair_chart((celdas + textos + marco).properties(height=170), width="stretch")
+
+    boton_descarga(dec["archivo_comprimido"], "📥 Descargar el archivo comprimido por el agente (.ti6g)",
+                   f"{Path(res['archivo']).stem}_agente.ti6g", "dl_agente")
+
+
+# ---------------------------------------------------------------- interfaz
+
+st.title("📡 Codificación, compresión y reconstrucción adaptable 5G/6G")
+st.caption("Fuente → Codificación → Compresión → Canal → Reconstrucción, con símbolos de N bits (8 a 32768).")
+
+if not compilar_si_hace_falta():
+    st.stop()
+
+with st.sidebar:
+    st.header("Parámetros")
+    n_bits = st.selectbox("Tamaño de símbolo N (bits)", VALORES_N, index=0)
+    metodo = st.selectbox("Codificación", list(METODOS), format_func=METODOS.get)
+    st.subheader("Canal binario simétrico")
+    p_error = st.number_input("Probabilidad de error p", min_value=0.0, max_value=0.5, value=0.0, step=0.0001, format="%.4f",
+                              help="0 = canal ideal")
+    pasos = st.slider("Pasos de LZW a mostrar", 20, 1000, 200, step=20)
+
+DATA.mkdir(exist_ok=True)
+origen = st.radio("Fuente de datos", ["Subir archivo", "Usar un archivo de data/"], horizontal=True)
+ruta_fuente = None
+if origen == "Subir archivo":
+    subido = st.file_uploader("Audio, video, texto, imagen o cualquier archivo")
+    if subido is not None:
+        ruta_fuente = DATA / Path(subido.name).name
+        if not ruta_fuente.exists() or ruta_fuente.stat().st_size != subido.size:
+            with open(ruta_fuente, "wb") as f:
+                f.write(subido.getbuffer())
+else:
+    disponibles = sorted(p for p in DATA.rglob("*") if p.is_file() and p.suffix != ".ti6g" and SALIDA not in p.parents)
+    if disponibles:
+        elegido = st.selectbox("Archivo", disponibles, format_func=lambda p: f"{p.relative_to(DATA).as_posix()}  ({tam(p.stat().st_size)})")
+        ruta_fuente = elegido
     else:
-        st.warning("Por favor, sube un archivo primero.")
+        st.info("No hay archivos en data/")
+
+if st.button("Procesar archivo", type="primary", disabled=ruta_fuente is None):
+    salida = SALIDA / f"{ruta_fuente.stem}_N{n_bits}_{metodo}"
+    ruta_json = salida / "resultados.json"
+    salida.mkdir(parents=True, exist_ok=True)
+    with st.spinner(f"Procesando {ruta_fuente.name} con N = {n_bits} bits..."):
+        rc, out, err = ejecutar([str(ruta_fuente), str(n_bits), "--metodo", metodo, "--p", repr(float(p_error)),
+                                 "--traza", str(pasos),
+                                 "--salida", str(salida), "--json", str(ruta_json)])
+    if rc not in (0, 3) or not ruta_json.exists():
+        st.error("Ocurrió un error en el núcleo C++")
+        st.code(err or out or "Sin mensaje de error")
+        st.session_state.pop("resultado", None)
+    else:
+        st.session_state["resultado"] = {"datos": json.loads(ruta_json.read_text(encoding="utf-8")), "consola": out + err,
+                                         "archivo": ruta_fuente.relative_to(DATA).as_posix()}
+
+res = st.session_state.get("resultado")
+if not res:
+    st.stop()
+
+d = res["datos"]
+f, c, comp, rec, k = d["fuente"], d["codificacion"], d["compresion"], d["reconstruccion"], d["canal"]
+metodo_elegido = c["metodo_elegido"]
+
+st.success(f"**{res['archivo']}** · {f['tipo']} ({f['formato']}) · N = {f['n_bits']} bits · codificación **{metodo_elegido}**"
+           f"{' (adaptable)' if c['adaptable'] else ''} · reconstrucción "
+           f"{'idéntica ✅' if rec['identico'] else 'DIFERENTE ❌'}")
+
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Entropía H", f"{f['entropia']:.4f} bits", help="bits/símbolo")
+m2.metric("Divergencia KL", f"{f['kl_uniforme_n']:.4f} bits", help="D(P‖U) respecto a la uniforme sobre 2^N símbolos")
+var_elegida = c[metodo_elegido.lower()]["varianza"]
+m3.metric("Varianza σ²", f"{var_elegida:.4f} bits²", help=f"Varianza de la codificación {metodo_elegido}")
+m4.metric("I(X;Y)", f"{k['simbolos_IXY']:.4f} bits", help="Información mutua fuente ↔ reconstrucción tras el canal")
+m5.metric("Comprimido", tam(comp["bytes"]), delta=f"{-100 * comp['ahorro']:+.1f}%", delta_color="inverse")
+
+tabs = st.tabs(["1 · Fuente", "2 · Codificación", "3 · Compresión", "4 · Reconstrucción", "5 · Canal e I(X;Y)",
+                "6 · Comparar N", "7 · Agente IA", "Consola"])
+
+# ---- 1. Fuente
+with tabs[0]:
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        st.subheader("Modelo estadístico de la fuente")
+        st.dataframe(pd.DataFrame([
+            ("Tipo de fuente", f"{f['tipo']} ({f['formato']})"),
+            ("Tamaño", tam(f["tamano_original"])),
+            ("N (bits/símbolo)", f"{f['n_bits']} ({f['bytes_por_simbolo']} bytes)"),
+            ("Símbolos en la secuencia (n)", f"{f['simbolos']:,}"),
+            ("Símbolos distintos (M)", f"{f['alfabeto']:,}"),
+            ("Bits de relleno del último bloque", f"{f['relleno_bits']:,}"),
+            ("Entropía H(X)", f"{f['entropia']:.6f} bits/símbolo"),
+            ("Entropía máxima log₂(2^N)", f"{f['entropia_maxima']:.0f} bits"),
+            ("Entropía por bit H/N", f"{f['entropia_por_bit']:.6f}"),
+            ("Redundancia 1 − H/N", f"{100 * f['redundancia']:.4f}%"),
+            ("D_KL(P‖U uniforme sobre 2^N)", f"{f['kl_uniforme_n']:.6f} bits"),
+            ("D_KL(P‖U uniforme sobre M)", f"{f['kl_uniforme_m']:.6f} bits"),
+            ("Información total n·H", f"{f['info_total_bits']:,.0f} bits"),
+        ], columns=["Medida", "Valor"]), hide_index=True)
+    with col_b:
+        st.subheader("Fórmulas")
+        st.latex(r"I(x_k) = -\log_2 P(x_k)")
+        st.latex(r"H(X) = -\sum_k P(x_k)\log_2 P(x_k)")
+        st.latex(r"D_{KL}(P\|U) = \sum_k P(x_k)\log_2\frac{P(x_k)}{U(x_k)} = N - H(X)")
+
+    st.subheader("Símbolos más frecuentes y su cantidad de información")
+    top = pd.DataFrame(d["top_simbolos"])
+    if not top.empty:
+        top["símbolo"] = top["hex"]
+        grafico_barras(top, "símbolo", "p", "Símbolo (hex)", "P(x)",
+                       [alt.Tooltip("hex:N", title="Símbolo"), alt.Tooltip("ascii:N", title="ASCII"),
+                        alt.Tooltip("p:Q", format=".6f", title="P(x)"), alt.Tooltip("informacion:Q", format=".4f", title="I(x) bits")],
+                       orden_x="-y")
+        st.dataframe(top[["hex", "ascii", "frecuencia", "p", "informacion", "long_huffman", "codigo_huffman"]].rename(columns={
+            "hex": "Símbolo (hex)", "ascii": "ASCII", "frecuencia": "Frecuencia", "p": "P(x)", "informacion": "I(x) [bits]",
+            "long_huffman": "L_k Huffman", "codigo_huffman": "Código Huffman"}), hide_index=True)
+
+# ---- 2. Codificación
+with tabs[1]:
+    st.subheader("Codificación uniforme vs no uniforme vs adaptable")
+    filas = [("Sin codificar (N bits)", c["sin_codificar"]["longitud_media"], 0.0, c["sin_codificar"]["eficiencia"], None, None, None)]
+    for clave, nombre in [("uniforme", "Uniforme"), ("huffman", "Huffman (mínima varianza)"), ("lzw", "LZW (adaptable)")]:
+        x = c[clave]
+        filas.append((nombre, x["longitud_media"], x["varianza"], x["eficiencia"], x.get("kraft"),
+                      x.get("longitud_min"), x.get("longitud_max")))
+    filas.insert(3, ("Huffman (empates abajo)", c["huffman"]["longitud_media"], c["huffman"]["varianza_empates_abajo"],
+                     c["huffman"]["eficiencia"], 1.0, c["huffman"]["longitud_min"], c["huffman"]["longitud_max_empates_abajo"]))
+    st.dataframe(pd.DataFrame(filas, columns=["Código", "L̄ [bits/símbolo]", "σ² [bits²]", "Eficiencia H/L̄", "Kraft Σ2^-L",
+                                              "L mín", "L máx"]), hide_index=True,
+                 column_config={"Eficiencia H/L̄": st.column_config.NumberColumn(format="percent")})
+
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        st.markdown("**Varianza en la codificación**")
+        st.latex(r"\bar{L} = \sum_{k=0}^{K-1} P_k L_k \qquad \sigma^2 = \sum_{k=0}^{K-1} P_k\,(L_k - \bar{L})^2")
+        st.caption("Para LZW, L_k es la cantidad de bits que le corresponde a cada símbolo de la fuente "
+                   "(bits del código emitido ÷ símbolos que cubre la frase).")
+    with col_b:
+        st.markdown("**Distribución de longitudes del código de Huffman**")
+        lh = pd.DataFrame(d["longitudes_huffman"])
+        if not lh.empty:
+            grafico_barras(lh, "longitud", "probabilidad", "Longitud L_k (bits)", "Probabilidad acumulada",
+                           [alt.Tooltip("longitud:Q", title="L_k"), alt.Tooltip("simbolos:Q", title="Símbolos"),
+                            alt.Tooltip("probabilidad:Q", format=".4f", title="Σ P_k")])
+            st.dataframe(lh.rename(columns={"longitud": "L_k", "simbolos": "Símbolos", "probabilidad": "Σ P_k"}), hide_index=True)
+
+    st.subheader("Secuencia codificada (primeros símbolos)")
+    muestra = pd.DataFrame(d["muestra"])
+    if not muestra.empty:
+        st.dataframe(muestra[["i", "hex", "ascii", "p", "informacion", "uniforme", "huffman"]].rename(columns={
+            "i": "#", "hex": "Símbolo (hex)", "ascii": "ASCII", "p": "P(x)", "informacion": "I(x)",
+            "uniforme": "Código uniforme", "huffman": "Código Huffman"}), hide_index=True)
+        st.code("Uniforme: " + " ".join(muestra["uniforme"]) + "\nHuffman:  " + " ".join(muestra["huffman"]), language="text")
+
+# ---- 3. Compresión
+with tabs[2]:
+    st.subheader("Eliminación de redundancia")
+    st.dataframe(pd.DataFrame([
+        (nombre, tam(c[clave]["bytes_cabecera"]), tam(c[clave]["bytes_carga"]), tam(c[clave]["bytes_total"]), c[clave]["razon"],
+         "✅" if nombre == metodo_elegido else "")
+        for clave, nombre in [("uniforme", "Uniforme"), ("huffman", "Huffman"), ("lzw", "LZW")]
+    ], columns=["Método", "Cabecera", "Datos", "Total", "Razón original/comprimido", "Elegido"]), hide_index=True,
+        column_config={"Razón original/comprimido": st.column_config.NumberColumn(format="%.4f")})
+
+    st.markdown(f"**Flujo comprimido ({metodo_elegido}), primeros 256 bits**")
+    st.code(comp["flujo_bits"] or "(vacío)", language="text")
+
+    st.subheader("Proceso iterativo del diccionario LZW")
+    st.caption(f"Primeros {len(d['traza_lzw'])} pasos de {c['lzw']['codigos_emitidos']:,} códigos emitidos. "
+               f"El diccionario empieza con los M = {f['alfabeto']:,} símbolos de la fuente y crece hasta "
+               f"{c['lzw']['diccionario_max']:,} entradas; el ancho de cada código crece con él.")
+    traza = pd.DataFrame(d["traza_lzw"])
+    if not traza.empty:
+        st.dataframe(traza[["paso", "posicion", "patron", "patron_ascii", "largo", "siguiente", "codigo", "ancho", "nueva_entrada"]]
+                     .rename(columns={"paso": "Paso", "posicion": "Posición", "patron": "Patrón (hex)", "patron_ascii": "Patrón (ASCII)",
+                                      "largo": "Símbolos", "siguiente": "Siguiente", "codigo": "Código emitido",
+                                      "ancho": "Bits", "nueva_entrada": "Nueva entrada"}),
+                     hide_index=True, height=420)
+
+# ---- 4. Reconstrucción
+with tabs[3]:
+    st.subheader("Decodificación, descompresión y reconstrucción")
+    st.markdown("El archivo se reconstruye **leyendo solamente `comprimido.ti6g`** (cabecera + alfabeto + tabla + datos) "
+                "y luego se compara byte a byte con el original.")
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Bytes reconstruidos", f"{rec['bytes']:,}")
+    r2.metric("Bytes originales", f"{f['tamano_original']:,}")
+    r3.metric("Resultado", "Idéntico" if rec["identico"] else "Diferente")
+    if not muestra.empty:
+        st.dataframe(muestra[["i", "hex", "reconstruido"]].assign(igual=lambda m: m["hex"] == m["reconstruido"]).rename(columns={
+            "i": "#", "hex": "Fuente (hex)", "reconstruido": "Reconstruido (hex)", "igual": "Igual"}), hide_index=True)
+    st.markdown("**Archivos de salida**")
+    b1, b2 = st.columns(2)
+    with b1:
+        boton_descarga(comp["archivo"], "📥 Descargar comprimido (.ti6g)", f"{Path(res['archivo']).stem}.ti6g", "dl_comp")
+    with b2:
+        boton_descarga(rec["archivo"], "🔄 Descargar reconstruido", f"reconstruido_{Path(res['archivo']).name}", "dl_rec")
+
+# ---- 5. Canal
+with tabs[4]:
+    st.subheader("Canal discreto sin memoria: canal binario simétrico (BSC)")
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        st.latex(r"P = \begin{bmatrix} P(y_0|x_0) & P(y_1|x_0) \\ P(y_0|x_1) & P(y_1|x_1) \end{bmatrix}"
+                 r"= \begin{bmatrix} 1-p & p \\ p & 1-p \end{bmatrix}")
+        st.latex(r"P(x_j, y_k) = P(y_k|x_j)\,P(x_j) \qquad P(y_k) = \sum_j P(y_k|x_j)\,P(x_j)")
+        st.latex(r"I(X;Y) = H(Y) - H(Y|X) \qquad C = 1 - H_b(p)")
+    with col_b:
+        etiquetas = ["x₀ = 0", "x₁ = 1"]
+        st.markdown("**Matriz de transición teórica P(y|x)**")
+        st.dataframe(pd.DataFrame(k["transicion"], index=etiquetas, columns=["y₀ = 0", "y₁ = 1"]))
+        st.markdown("**Matriz de transición medida**")
+        st.dataframe(pd.DataFrame(k["transicion_medida"], index=etiquetas, columns=["y₀ = 0", "y₁ = 1"]).style.format("{:.6f}"))
+        st.markdown("**Distribución conjunta P(x, y)**")
+        st.dataframe(pd.DataFrame(k["conjunta"], index=etiquetas, columns=["y₀ = 0", "y₁ = 1"]).style.format("{:.6f}"))
+
+    st.markdown("**Medidas por bit del flujo codificado**")
+    st.dataframe(pd.DataFrame([
+        ("p (probabilidad de error)", f"{k['p']:g}"),
+        ("Bits transmitidos", f"{k['bits']:,}"),
+        ("P(x₀), P(x₁)", f"{k['px0']:.6f}, {k['px1']:.6f}"),
+        ("P(y₀), P(y₁)", f"{k['py0']:.6f}, {k['py1']:.6f}"),
+        ("Errores 0→1 / 1→0", f"{k['errores_0a1']:,} / {k['errores_1a0']:,}"),
+        ("Tasa de error de bit medida", f"{k['tasa_error_bit']:.3e}"),
+        ("H(X)", f"{k['HX']:.6f} bits"), ("H(Y)", f"{k['HY']:.6f} bits"),
+        ("H(Y|X) = H_b(p)", f"{k['HY_dado_X']:.6f} bits"), ("H(X|Y) (equivocación)", f"{k['HX_dado_Y']:.6f} bits"),
+        ("I(X;Y) teórica", f"{k['IXY']:.6f} bits"), ("I(X;Y) medida", f"{k['IXY_medida']:.6f} bits"),
+        ("Capacidad C", f"{k['capacidad']:.6f} bits/uso"),
+    ], columns=["Medida", "Valor"]), hide_index=True)
+
+    st.markdown("**Medidas por símbolo: fuente X ↔ reconstrucción Y**")
+    st.latex(r"I(X;Y) = H(X) + H(Y) - H(X,Y)")
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("H(X)", f"{k['simbolos_HX']:.4f}")
+    s2.metric("H(Y)", f"{k['simbolos_HY']:.4f}")
+    s3.metric("I(X;Y)", f"{k['simbolos_IXY']:.4f}")
+    s4.metric("Símbolos errados", f"{100 * k['tasa_error_simbolo']:.2f}%")
+    if k["p"] > 0:
+        st.markdown("**Flujo enviado vs recibido** (los `^` marcan bits invertidos por el canal)")
+        st.code(f"X: {comp['flujo_bits']}\nY: {k['flujo_recibido']}\n   {marcar_diferencias(comp['flujo_bits'], k['flujo_recibido'])}",
+                language="text")
+        if not muestra.empty and "canal" in muestra:
+            st.dataframe(muestra[["i", "hex", "canal"]].rename(columns={"i": "#", "hex": "Enviado (hex)", "canal": "Recibido (hex)"}),
+                         hide_index=True)
+        boton_descarga(k.get("archivo"), "📥 Descargar archivo recibido con ruido", f"canal_{Path(res['archivo']).name}", "dl_canal")
+
+# ---- 6. Comparar N
+with tabs[5]:
+    st.subheader("Adaptabilidad: el mismo archivo con distintos N")
+    seleccion = st.multiselect("Valores de N", VALORES_N, default=VALORES_N)
+    if st.button("Comparar", disabled=not seleccion):
+        ruta_json = SALIDA / f"barrido_{Path(res['archivo']).stem}.json"
+        SALIDA.mkdir(parents=True, exist_ok=True)
+        with st.spinner("Analizando todos los N (puede tardar con archivos grandes)..."):
+            rc, out, err = ejecutar([str(DATA / res["archivo"]) if (DATA / res["archivo"]).exists() else f["ruta"],
+                                     "--barrido", ",".join(map(str, sorted(seleccion))), "--json", str(ruta_json)])
+        if rc != 0:
+            st.error(err or out)
+        else:
+            st.session_state["barrido"] = {"archivo": res["archivo"],
+                                           "filas": json.loads(ruta_json.read_text(encoding="utf-8"))["filas"]}
+    barrido = st.session_state.get("barrido")
+    if barrido and barrido["archivo"] == res["archivo"]:
+        df = pd.DataFrame(barrido["filas"])
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown("**Entropía por bit H/N**")
+            grafico_lineas(df, "entropia_por_bit", "H/N")
+            st.markdown("**Varianza de Huffman σ²**")
+            grafico_lineas(df, "huffman_varianza", "σ² (bits²)")
+        with g2:
+            st.markdown("**Símbolos distintos M**")
+            grafico_lineas(df, "alfabeto", "M", formato=",.0f")
+            st.markdown("**Razón de compresión del mejor método**")
+            grafico_lineas(df, "razon_mejor", "original / comprimido")
+        st.dataframe(df[["n_bits", "simbolos", "alfabeto", "entropia", "entropia_por_bit", "kl_uniforme_n", "huffman_longitud_media",
+                         "huffman_varianza", "huffman_varianza_max", "huffman_eficiencia", "lzw_bits_por_simbolo",
+                         "total_uniforme", "total_huffman", "total_lzw", "mejor", "razon_mejor", "tiempo_ms"]].rename(columns={
+            "n_bits": "N", "simbolos": "n", "alfabeto": "M", "entropia": "H", "entropia_por_bit": "H/N", "kl_uniforme_n": "D_KL",
+            "huffman_longitud_media": "L̄ Huffman", "huffman_varianza": "σ² Huffman", "huffman_varianza_max": "σ² empates abajo",
+            "huffman_eficiencia": "η Huffman", "lzw_bits_por_simbolo": "LZW bits/símbolo", "total_uniforme": "Bytes uniforme",
+            "total_huffman": "Bytes Huffman", "total_lzw": "Bytes LZW", "mejor": "Mejor", "razon_mejor": "Razón",
+            "tiempo_ms": "Tiempo (ms)"}), hide_index=True)
+        mejor = df.loc[df["razon_mejor"].idxmax()]
+        st.markdown(f"Mejor N: **{int(mejor['n_bits'])} bits** con **{mejor['mejor']}** (razón {mejor['razon_mejor']:.4f}:1)")
+
+# ---- 7. Agente de IA
+with tabs[6]:
+    seccion_agente(res)
+
+# ---- Consola
+with tabs[7]:
+    st.code(res["consola"][-20000:] or "(sin salida)", language="text")
+    st.caption("Tiempos (ms): " + ", ".join(f"{a} {b:,.0f}" for a, b in d["tiempos_ms"].items()))

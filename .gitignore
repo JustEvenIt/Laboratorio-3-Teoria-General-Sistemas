@@ -10,3 +10,5 @@
 desktop.inis
 
 venv/
+# Salidas generadas por el sistema
+data/salida/

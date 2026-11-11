@@ -11,6 +11,7 @@
 #include "../include/AgenteRL.h"
 #include "../include/Canal.h"
 #include "../include/Compresor.h"
+#include "../include/Enlace.h"
 #include "../include/Json.h"
 #include "../include/ProcesadorFuente.h"
 #include "../include/Sistema.h"
@@ -32,6 +33,9 @@ struct Opciones {
     vector<int> barrido;           // modo comparación de varios N
     bool agente = false;           // modo agente: decide la mejor codificación
     OpcionesAgente ag;
+    bool enlace = false;           // modo enlace 5G NR / requisitos 5G y 6G
+    string comprimido;             // archivo .ti6g que se transmite
+    ParametrosEnlace en;
 };
 
 static void uso() {
@@ -41,6 +45,8 @@ static void uso() {
             "     codificador_6g <archivo> --agente [--bloque 0] [--pasos 0]\n"
             "                    [--semilla 42] [--candidatas 3] [--tasa 0.003] [--ocultas 64] [--memoria 1000] [--decaimiento 0.97]\n"
             "                    [--eps-cambio 0.6] [--eps-min 0.02] [--ph 0.02,1] [--sin-detector] [--salida DIR] [--json RUTA]\n"
+            "     codificador_6g <archivo> --enlace --comprimido ARCHIVO.ti6g [--snr 20] [--capas 4]\n"
+            "                    [--servicio embb|urllc] [--tabla-mcs 256|64] [--json RUTA]\n"
             "N debe ser multiplo de 8, entre 8 y 32768.\n";
 }
 
@@ -198,6 +204,12 @@ int main(int argc, char* argv[]) {
                 op.ag.delta = stod(v.substr(0, coma));
                 op.ag.lambda = stod(v.substr(coma + 1));
             }
+            else if (a == "--enlace") op.enlace = true;
+            else if (a == "--comprimido") op.comprimido = valor();
+            else if (a == "--snr") op.en.snrDb = stod(valor());
+            else if (a == "--capas") op.en.capas = stoi(valor());
+            else if (a == "--servicio") op.en.servicio = valor();
+            else if (a == "--tabla-mcs") op.en.tablaMCS = stoi(valor());
             else if (a == "--barrido") {
                 stringstream ss(valor());
                 string item;
@@ -233,6 +245,19 @@ int main(int argc, char* argv[]) {
     if (contenido.empty()) { cerr << "El archivo esta vacio.\n"; return 1; }
 
     if (!op.barrido.empty()) return ejecutarBarrido(op, contenido);
+    if (op.enlace) {
+        const int capasValidas[] = {1, 2, 4, 8};
+        error_code ec;
+        uint64_t bytesComprimido = op.comprimido.empty() ? 0 : fs::file_size(op.comprimido, ec);
+        if (op.comprimido.empty() || ec || find(begin(capasValidas), end(capasValidas), op.en.capas) == end(capasValidas) ||
+            (op.en.servicio != "embb" && op.en.servicio != "urllc") || (op.en.tablaMCS != 256 && op.en.tablaMCS != 64) ||
+            op.en.snrDb < -20 || op.en.snrDb > 60) {
+            uso();
+            return 2;
+        }
+        return ejecutarEnlace(op.ruta, contenido.size(), bytesComprimido, op.en,
+                              op.json.empty() ? (fs::path(op.salida) / "enlace.json").string() : op.json);
+    }
     if (op.agente) {
         if ((op.ag.bytesBloque != 0 && op.ag.bytesBloque < 256) ||
             op.ag.bytesBloque > (1u << 20) || (op.ag.pasos != 0 && op.ag.pasos < 10) || op.ag.pasos > 100000 || op.ag.ocultas < 1 || op.ag.tasa <= 0 ||

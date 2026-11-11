@@ -49,6 +49,30 @@ Validación con 323 archivos reales (código, texto, imágenes, binarios, datos,
 que la búsqueda exhaustiva de las 27 combinaciones, con 12.5 compresiones del archivo completo en promedio (en vez de 27) y todas
 las reconstrucciones idénticas.
 
+## Transmisión por 5G NR y requisitos de 5G y 6G
+
+La pestaña **8 · 5G / 6G** muestra, sin tecnicismos, cuánto tardaría en llegar el archivo comprimido (el del agente si se ejecutó)
+frente al original: con las velocidades y la demora que exigen los estándares de 5G (IMT-2020) y 6G (IMT-2030), y en una red 5G
+real de 3.5 GHz con buena señal, además de una tabla con lo que pide cada estándar. Por debajo, el núcleo C++ calcula la red real
+con las normas de 3GPP (el detalle completo se obtiene con `--enlace` desde la terminal):
+
+| Qué se calcula | Referencia |
+|---|---|
+| Recursos por ancho de banda: n28 (700 MHz, 20 MHz, 15 kHz, 106 RB, FDD), n78 (3.5 GHz, 100 MHz, 30 kHz, 273 RB, TDD), n257 (28 GHz, 400 MHz, 120 kHz, 264 RB, TDD) | TS 38.101-1/-2, TS 38.211 |
+| Tablas MCS (hasta 64QAM y hasta 256QAM) y tamaño del bloque de transporte (TBS) | TS 38.214 §5.1.3 |
+| CRC, grafo base del LDPC, segmentación en bloques de código, tamaño de elevación Zc y relleno | TS 38.212 §5.2.2, §7.2 |
+| Tasa pico | TS 38.306 §4.1.2 |
+| Velocidad, latencia y confiabilidad de 5G | ITU-R M.2410 (IMT-2020) |
+| Valores de 6G | ITU-R M.2160 (IMT-2030) |
+
+Supuestos que no fija el estándar: el MCS se elige como el más alto cuya eficiencia espectral no supera log₂(1 + SNR/Γ)
+(Γ = 1.5 dB en eMBB y 4 dB en URLLC); PDSCH de 13 símbolos (eMBB) o mini-slot de 7 (URLLC); DMRS de 12 RE por PRB; TDD con
+patrón DDDSU; BLER objetivo 10% (eMBB) o 10⁻⁵ (URLLC); sin cabeceras de PDCP, RLC ni MAC. 6G todavía no tiene especificación
+técnica de 3GPP, por eso se compara con los valores de IMT-2030.
+
+El cálculo del TBS y de la segmentación se verificó contra una segunda implementación independiente con aritmética exacta
+(16 848 casos, 0 diferencias); la tasa pico de n78 con 4 capas y 256QAM da 2.34 Gbit/s, el valor publicado.
+
 ## Compilación y Ejecución
 
 ```bash
@@ -57,6 +81,10 @@ python -m venv venv
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+En la barra lateral se elige el archivo (de `data/`, incluidas sus subcarpetas, o subido), N, el método y el ruido del canal;
+los resultados se recalculan solos al cambiar cualquiera de ellos (archivos de más de 32 MB piden confirmar con **Procesar
+archivo**). El agente (pestaña 7) se ejecuta con su botón; la pestaña 5G/6G se calcula sola.
 
 La interfaz compila el núcleo automáticamente con `g++` si el ejecutable no existe o si cambió el código. Para compilarlo a mano:
 
@@ -70,6 +98,7 @@ Uso desde la terminal:
 ./codificador_6g.exe data/archivo.mp3 1024 --metodo auto --p 0.001 --salida data/salida/prueba --json resultados.json
 ./codificador_6g.exe data/archivo.mp3 --barrido 8,16,32,64,128,256,512,1024,2048 --json barrido.json
 ./codificador_6g.exe data/archivo.mp3 --agente --salida data/salida/agente --json agente.json
+./codificador_6g.exe data/archivo.mp3 --enlace --comprimido data/salida/agente/agente.ti6g --snr 20 --capas 4 --servicio embb --json enlace.json
 ```
 
 `data/ejemplo_varianza_huffman.txt` reproduce el ejemplo clásico $P = \{0.4, 0.2, 0.2, 0.1, 0.1\}$. Las dos variantes de Huffman tienen el mismo $\bar L = 2.2$, pero $\sigma^2 = 0.16$ frente a $1.36$.

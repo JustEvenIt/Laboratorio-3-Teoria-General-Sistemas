@@ -2,6 +2,9 @@
 
 Este repositorio contiene un sistema desarrollado en C++ diseñado para fragmentar, analizar estadísticamente, comprimir y reconstruir grandes volúmenes de datos (audio, video, texto, imagen). El proyecto está orientado a simular las necesidades de procesamiento masivo en redes de telecomunicaciones modernas (5G y 6G), soportando un tamaño de símbolo adaptable desde 8 hasta 32768 bits.
 
+La guía [GUIA_EXPLICACION.md](GUIA_EXPLICACION.md) explica cada parte del programa para presentarlo, con resultados de los
+archivos de prueba sin comprimir de `data/sin_comprimir/`.
+
 ## Arquitectura del Proyecto
 
 El código fuente está estructurado siguiendo las mejores prácticas de C++, separando las definiciones de las implementaciones:

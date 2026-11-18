@@ -505,7 +505,7 @@ def seccion_control_error(d, res):
                 "un bit de paridad.\n"
                 "- Un **CRC** detecta los errores que quedan y **HARQ** combina corrección y retransmisión.\n\n"
                 "El cálculo de la red real de la pestaña 9 ya incluye el CRC y los bloques LDPC de esa norma. Para 6G, "
-                "3GPP parte de los mismos LDPC y Polar y en 2026 acordó agregar un nuevo grafo base de LDPC; el resto sigue "
+                "en junio de 2026 3GPP acordó soportar un nuevo grafo base de LDPC (BG3); el resto de la codificación sigue "
                 "en estudio.")
 
 

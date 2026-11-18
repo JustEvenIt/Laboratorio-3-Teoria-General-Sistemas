@@ -275,7 +275,7 @@ Para 6G se usa el valor medio de su rango.
 | ¿Por qué FEC no salvó el archivo comprimido? | El (7,4) corrige un error por bloque; los bloques con dos o más se decodifican mal. Con Huffman o LZW basta un bit errado para que lo que sigue quede corrido de posición, y con LZW el error se repite. |
 | ¿Por qué no basta con dar n y k? | Hay muchas matrices P para el mismo (n, k) y no todas corrigen lo mismo. El programa busca la de mayor distancia mínima y dice si es la mayor posible, por las cotas de Singleton, Hamming y Griesmer o porque revisó todas las matrices con más distancia. |
 | ¿Qué códigos usa 5G? | LDPC para los datos y Polar para la señalización (3GPP TS 38.212), con bloques de miles de bits. Para mensajes de control de 3 a 11 bits usa un código de bloque (32, K) que se calcula con c = m·G. |
-| ¿Y 6G? | 3GPP parte de los mismos LDPC y Polar; en 2026 acordó agregar un nuevo grafo base de LDPC y el resto sigue en estudio. |
+| ¿Y 6G? | En junio de 2026 3GPP acordó soportar un nuevo grafo base de LDPC (BG3); el resto de la codificación sigue en estudio. |
 
 ## 8. Supuestos y límites
 

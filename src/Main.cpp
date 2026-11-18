@@ -11,6 +11,7 @@
 #include "../include/AgenteRL.h"
 #include "../include/Canal.h"
 #include "../include/Compresor.h"
+#include "../include/ControlError.h"
 #include "../include/Enlace.h"
 #include "../include/Json.h"
 #include "../include/ProcesadorFuente.h"
@@ -24,6 +25,8 @@ struct Opciones {
     int nBits = 8;
     string metodo = "auto";        // auto | uniforme | huffman | lzw
     double p = 0.0;                // probabilidad de error del canal BSC
+    string fec = "7,4";            // código de bloque: n,k o P:filas (ninguno omite el control de error)
+    int arqMax = 8;                // ARQ: transmisiones máximas por bloque
     uint64_t semilla = 42;
     string salida = "data/salida";
     string json;
@@ -40,6 +43,7 @@ struct Opciones {
 
 static void uso() {
     cerr << "Uso: codificador_6g <archivo> <N bits> [--metodo auto|uniforme|huffman|lzw] [--p 0.001]\n"
+            "                    [--fec n,k (ej. 7,4) | P:110,011,111,101 | ninguno] [--arq-max 8]\n"
             "                    [--semilla 42] [--salida DIR] [--json RUTA] [--traza 200] [--muestra 16]\n"
             "     codificador_6g <archivo> --barrido 8,16,32,... [--json RUTA]\n"
             "     codificador_6g <archivo> --agente [--bloque 0] [--pasos 0]\n"
@@ -180,6 +184,8 @@ int main(int argc, char* argv[]) {
         try {
             if (a == "--metodo") op.metodo = valor();
             else if (a == "--p") op.p = stod(valor());
+            else if (a == "--fec") op.fec = valor();
+            else if (a == "--arq-max") op.arqMax = stoi(valor());
             else if (a == "--semilla") op.semilla = stoull(valor());
             else if (a == "--salida") op.salida = valor();
             else if (a == "--json") op.json = valor();
@@ -235,6 +241,13 @@ int main(int argc, char* argv[]) {
     if (op.p < 0 || op.p > 0.5) {
         cerr << "La probabilidad de error del canal debe estar entre 0 y 0.5\n";
         return 2;
+    }
+    CodigoBloque codigo;
+    const bool usarControl = op.fec != "ninguno";
+    {
+        string errorCodigo;
+        if (usarControl && !CodigoBloque::crear(op.fec, codigo, errorCodigo)) { cerr << errorCodigo << "\n"; return 2; }
+        if (op.arqMax < 1 || op.arqMax > 64) { cerr << "--arq-max debe estar entre 1 y 64\n"; return 2; }
     }
 
     ProcesadorFuente procesador;
@@ -350,7 +363,21 @@ int main(int argc, char* argv[]) {
     cout << "[Reconstruccion] " << (exacto ? "Identica al original (sin perdida)" : "DIFERENTE al original") << "\n";
 
     // ===== ETAPA 5: CANAL BSC Y INFORMACIÓN MUTUA =====
+    // Archivo que obtiene el receptor a partir de los índices decodificados (⊥ se escribe como ceros)
+    auto escribirRecibido = [&](const string& ruta, const vector<uint32_t>& ids) {
+        ofstream o(ruta, ios::binary);
+        vector<unsigned char> bloque(f.bytesPorSimbolo, 0);
+        uint64_t escritos = 0;
+        for (uint32_t id : ids) {
+            const unsigned char* p = id < M ? f.simbolo(id) : bloque.data();
+            uint64_t b = min<uint64_t>(f.bytesPorSimbolo, f.tamanoOriginal - escritos);
+            o.write((const char*)p, b);
+            escritos += b;
+        }
+    };
     t = chrono::steady_clock::now();
+    vector<uint8_t> cargaOriginal;  // flujo comprimido tal como sale del transmisor, para el control de error
+    if (usarControl) cargaOriginal = c.carga;
     // El flujo se modifica en el lugar: desde aquí c.carga es lo que llega al receptor
     ResultadoCanal rc = Canal::transmitirBSC(c.carga, c.bitsCarga, op.p, op.semilla);
     MetricasMutua mm;
@@ -358,21 +385,52 @@ int main(int argc, char* argv[]) {
     if (rc.errores01 + rc.errores10 > 0) {
         idsCanal = compresor.decodificar(c, n, M);
         mm = Sistema::informacionMutua(f.ids, idsCanal, f.frecuencias, mf.entropia);
-        ofstream o(rutaCanal, ios::binary);
-        vector<unsigned char> bloque(f.bytesPorSimbolo, 0);
-        uint64_t escritos = 0;
-        for (uint32_t id : idsCanal) {
-            const unsigned char* p = id < M ? f.simbolo(id) : bloque.data();
-            uint64_t b = min<uint64_t>(f.bytesPorSimbolo, f.tamanoOriginal - escritos);
-            o.write((const char*)p, b);
-            escritos += b;
-        }
+        escribirRecibido(rutaCanal, idsCanal);
     } else {
         mm.HX = mm.HY = mm.HXY = mm.IXY = mf.entropia;
     }
     double tCanal = ms(t);
     cout << "[Canal] BSC p=" << op.p << " | errores de bit: " << (rc.errores01 + rc.errores10)
          << " | I(X;Y) simbolos=" << mm.IXY << " de H(X)=" << mf.entropia << "\n";
+
+    // ===== ETAPA 6: CONTROL DE ERROR (código de bloque lineal: corrección FEC y retransmisión ARQ) =====
+    // El mismo flujo comprimido pasa por el mismo BSC (misma p y semilla), ahora protegido con el código
+    struct Recuperacion {
+        ResultadoControl r;
+        MetricasMutua mm;
+        string archivo;
+        bool identico = true;
+        double ms = 0;
+    };
+    Recuperacion recFEC, recARQ;
+    if (usarControl) {
+        auto recuperar = [&](Recuperacion& x, vector<uint8_t>& recuperada, const string& sufijo) {
+            x.identico = x.r.bitsErroneos == 0;
+            if (x.identico) {  // el flujo comprimido llegó intacto: la reconstrucción es la original
+                x.mm.HX = x.mm.HY = x.mm.HXY = x.mm.IXY = mf.entropia;
+                return;
+            }
+            c.carga.swap(recuperada);  // el decodificador lee c.carga
+            vector<uint32_t> ids = compresor.decodificar(c, n, M);
+            c.carga.swap(recuperada);
+            x.mm = Sistema::informacionMutua(f.ids, ids, f.frecuencias, mf.entropia);
+            x.archivo = (fs::path(op.salida) / ("reconstruido_" + sufijo + ext)).string();
+            escribirRecibido(x.archivo, ids);
+        };
+        vector<uint8_t> recuperada;
+        t = chrono::steady_clock::now();
+        recFEC.r = ControlError::fec(codigo, cargaOriginal, c.bitsCarga, op.p, op.semilla, recuperada);
+        recuperar(recFEC, recuperada, "fec");
+        recFEC.ms = ms(t);
+        t = chrono::steady_clock::now();
+        recARQ.r = ControlError::arq(codigo, cargaOriginal, c.bitsCarga, op.p, op.semilla, op.arqMax, recuperada);
+        recuperar(recARQ, recuperada, "arq");
+        recARQ.ms = ms(t);
+        cout << "[Control de error] " << codigo.nombre << " d_min=" << codigo.dMin << " corrige " << codigo.t << "\n"
+             << "[Control de error] FEC: " << recFEC.r.erroresCanal << " errores en el canal -> " << recFEC.r.bitsErroneos
+             << " bits errados | ARQ: " << recARQ.r.transmisiones - recARQ.r.bloques << " retransmisiones -> "
+             << recARQ.r.bitsErroneos << " bits errados\n";
+    }
 
     // ===== RESULTADOS PARA LA INTERFAZ =====
     if (op.json.empty()) return exacto ? 0 : 3;
@@ -507,9 +565,129 @@ int main(int argc, char* argv[]) {
      .str("archivo", idsCanal.empty() ? "" : rutaCanal)
      .fin();
 
+    if (usarControl) {
+        const int nc = codigo.n, kc = codigo.k, rc_ = nc - kc;
+        const double R = (double)kc / nc;
+        j.objeto("control_error");
+
+        // Estructura del código: P, G = [P | I_k], H = [I_{n-k} | P^T], palabras y síndromes
+        j.objeto("codigo")
+         .str("nombre", codigo.nombre).str("especificacion", op.fec).ent("n", nc).ent("k", kc).num("tasa", R)
+         .ent("d_min", codigo.dMin).ent("corrige", codigo.t).ent("detecta", codigo.dMin - 1)
+         .booleano("perfecto", codigo.perfecto()).ent("d_cota", codigo.dCota).str("construccion", codigo.construccion)
+         .ent("d_mejor", codigo.dMejor).booleano("d_mejor_probado", codigo.dMejorProbado)
+         .booleano("GHt_cero", all_of(codigo.G.begin(), codigo.G.end(), [&](uint32_t g) { return codigo.sindrome(g) == 0; }));
+        j.arreglo("P");
+        for (uint32_t x : codigo.P) j.str(nullptr, bitsDe(x, rc_));
+        j.fin().arreglo("G");
+        for (uint32_t x : codigo.G) j.str(nullptr, bitsDe(x, nc));
+        j.fin().arreglo("H");
+        for (uint32_t x : codigo.H) j.str(nullptr, bitsDe(x, nc));
+        j.fin();
+        const uint32_t totalPalabras = 1u << kc, totalSindromes = 1u << rc_;
+        j.ent("total_palabras", totalPalabras).arreglo("palabras");
+        for (uint32_t m = 0; m < min<uint32_t>(totalPalabras, 64); ++m) {
+            uint32_t cw = codigo.codificar(m);
+            j.objeto().str("m", bitsDe(m, kc)).str("b", bitsDe(cw >> kc, rc_)).str("c", bitsDe(cw, nc))
+             .ent("peso", __builtin_popcount(cw)).fin();
+        }
+        j.fin().arreglo("distribucion_pesos");
+        for (int w = 0; w <= nc; ++w)
+            if (codigo.pesos[w]) j.objeto().ent("peso", w).ent("palabras", codigo.pesos[w]).fin();
+        j.fin();
+        // Tabla de síndromes ordenada por el peso del error: primero s = 0, luego los errores de un bit por posición
+        vector<uint32_t> sindromes(totalSindromes);
+        for (uint32_t s = 0; s < totalSindromes; ++s) sindromes[s] = s;
+        sort(sindromes.begin(), sindromes.end(), [&](uint32_t a, uint32_t b) {
+            int pa = __builtin_popcount(codigo.lider[a]), pb = __builtin_popcount(codigo.lider[b]);
+            return pa != pb ? pa < pb : codigo.lider[a] > codigo.lider[b];
+        });
+        j.ent("total_sindromes", totalSindromes).arreglo("sindromes");
+        for (uint32_t i = 0; i < min<uint32_t>(totalSindromes, 64); ++i) {
+            uint32_t s = sindromes[i], e = codigo.lider[s];
+            int peso = __builtin_popcount(e);
+            j.objeto().str("s", bitsDe(s, rc_)).str("e", bitsDe(e, nc)).ent("peso", peso)
+             .ent("posicion", peso == 1 ? nc - __builtin_ctz(e) : 0).fin();
+        }
+        j.fin().arreglo("lideres_por_peso");
+        for (int w = 0; w <= nc; ++w)
+            if (codigo.lideresPorPeso[w]) j.objeto().ent("peso", w).ent("lideres", codigo.lideresPorPeso[w]).fin();
+        j.fin().fin();
+
+        // Valores teóricos por bloque en un BSC con probabilidad p
+        const double pLimpio = pow(1 - op.p, nc);
+        const double pNoDetectado = codigo.probabilidadNoDetectado(op.p);
+        const double pRetransmitir = max(0.0, 1 - pLimpio - pNoDetectado);  // s != 0
+        const double qM = pow(pRetransmitir, op.arqMax);
+        const double esperadas = pRetransmitir < 1 ? (1 - qM) / (1 - pRetransmitir) : op.arqMax;
+        j.objeto("teoria")
+         .num("p", op.p).num("tasa", R).num("capacidad", rc.capacidad).booleano("tasa_menor_capacidad", R < rc.capacidad)
+         .num("p_bloque_sin_control", 1 - pow(1 - op.p, kc))
+         .num("p_bloque_fec", max(0.0, 1 - codigo.probabilidadCorrecto(op.p)))
+         .num("p_no_detectado", pNoDetectado).num("p_retransmitir", pRetransmitir)
+         .num("transmisiones_esperadas", esperadas).num("eficiencia_arq", R / esperadas)
+         .num("p_bloque_arq", min(1.0, pNoDetectado * esperadas + qM))
+         .ent("arq_max", op.arqMax)
+         .fin();
+
+        // Sin control de error: lo que ya pasó por el canal en la etapa 5
+        uint64_t erroresSin = rc.errores01 + rc.errores10;
+        j.objeto("sin_control")
+         .ent("bits_mensaje", c.bitsCarga).ent("bits_enviados", c.bitsCarga).ent("errores_canal", erroresSin)
+         .num("ber_canal", rc.tasaErrorBit).ent("bits_erroneos", erroresSin).num("ber_residual", rc.tasaErrorBit)
+         .num("IXY_bit", rc.IXYmedida).num("simbolos_HY", mm.HY).num("simbolos_HXY", mm.HXY).num("simbolos_IXY", mm.IXY)
+         .num("simbolos_HX_dado_Y", mm.HXdadoY).ent("simbolos_errados", mm.errores).num("tasa_error_simbolo", mm.tasaErrorSimbolo)
+         .booleano("identico", erroresSin == 0).str("archivo", idsCanal.empty() ? "" : rutaCanal)
+         .fin();
+
+        auto escribirControl = [&](const char* clave, const Recuperacion& x, bool esARQ) {
+            const ResultadoControl& r = x.r;
+            j.objeto(clave)
+             .ent("bits_mensaje", r.bitsMensaje).ent("bloques", r.bloques).ent("relleno_bits", r.relleno)
+             .ent("transmisiones", r.transmisiones).ent("retransmisiones", r.transmisiones - r.bloques)
+             .ent("bits_enviados", r.bitsEnviados).ent("errores_canal", r.erroresCanal)
+             .num("ber_canal", r.bitsEnviados ? (double)r.erroresCanal / r.bitsEnviados : 0)
+             .ent("bloques_con_error", r.bloquesConError).ent("bloques_detectados", r.bloquesDetectados)
+             .ent("bloques_no_detectados", r.bloquesNoDetectados).ent("bloques_corregidos", r.bloquesCorregidos)
+             .ent("bloques_mal_corregidos", r.bloquesMalCorregidos).ent("bloques_fallidos", r.bloquesFallidos)
+             .ent("bits_corregidos", r.bitsCorregidos).ent("bits_erroneos", r.bitsErroneos)
+             .num("ber_residual", r.bitsMensaje ? (double)r.bitsErroneos / r.bitsMensaje : 0)
+             .num("eficiencia", r.bitsEnviados ? (double)r.bitsMensaje / r.bitsEnviados : 0)
+             .num("IXY_bit", r.IXYbit).num("simbolos_HY", x.mm.HY).num("simbolos_HXY", x.mm.HXY)
+             .num("simbolos_IXY", x.mm.IXY).num("simbolos_HX_dado_Y", x.mm.HXdadoY)
+             .ent("simbolos_errados", x.mm.errores).num("tasa_error_simbolo", x.mm.tasaErrorSimbolo)
+             .booleano("identico", x.identico).str("archivo", x.archivo).num("tiempo_ms", x.ms);
+            j.arreglo("muestra");
+            for (const MuestraBloque& b : r.muestra) {
+                string estado;
+                if (esARQ) {
+                    if (b.sFinal) estado = "Falló: " + to_string(b.intentos) + " envíos con error";
+                    else if (b.eFinal) estado = "Error no detectado";
+                    else if (b.intentos > 1)
+                        estado = "Correcto tras " + to_string(b.intentos - 1) + (b.intentos > 2 ? " retransmisiones" : " retransmisión");
+                    else estado = "Sin error";
+                } else {
+                    if (!b.e) estado = "Sin error";
+                    else if (!b.s) estado = "Error no detectado";
+                    else if (b.cEstimado == b.c) estado = "Corregido";
+                    else estado = "Mal corregido";
+                }
+                j.objeto().ent("bloque", b.indice + 1).str("m", bitsDe(b.m, kc)).str("c", bitsDe(b.c, nc))
+                 .str("e", bitsDe(b.e, nc)).str("r", bitsDe(b.r, nc)).str("s", bitsDe(b.s, rc_))
+                 .str("e_est", bitsDe(b.eEstimado, nc)).str("c_est", bitsDe(b.cEstimado, nc)).str("m_est", bitsDe(b.mEstimado, kc))
+                 .ent("intentos", b.intentos).str("estado", estado).fin();
+            }
+            j.fin().fin();
+        };
+        escribirControl("fec", recFEC, false);
+        escribirControl("arq", recARQ, true);
+        j.fin();
+    }
+
     j.objeto("tiempos_ms")
      .num("fuente", tFuente).num("uniforme_huffman", tCodificacion).num("lzw", tLZW)
      .num("reconstruccion", tReconstruccion).num("canal", tCanal)
+     .num("fec", recFEC.ms).num("arq", recARQ.ms)
      .fin();
 
     j.fin();

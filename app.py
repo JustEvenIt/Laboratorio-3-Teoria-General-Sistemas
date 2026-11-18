@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -287,12 +288,293 @@ def seccion_enlace(res, d):
                "sus valores son objetivos. Para 6G la gráfica usa el valor medio de cada rango.")
 
 
+# ---------------------------------------------------------------- control de error (códigos de bloque lineales)
+
+SUB = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+
+
+def matriz_latex(nombre, filas, corte):
+    """Matriz binaria con una línea vertical después de la columna 'corte', como G = [P | I_k]."""
+    columnas = "c" * corte + "|" + "c" * (len(filas[0]) - corte)
+    cuerpo = r" \\ ".join(" & ".join(fila) for fila in filas)
+    return rf"{nombre} = \left[\begin{{array}}{{{columnas}}} {cuerpo} \end{{array}}\right]"
+
+
+def prob(x):
+    return "0" if x == 0 else (f"{x:.3e}" if x < 1e-3 else f"{x:.6f}")
+
+
+def seccion_control_error(d, res):
+    ce = d.get("control_error")
+    if not ce:
+        st.info("El control de error está desactivado. Elige un código en la barra lateral para proteger el flujo comprimido.")
+        return
+    cod, teo, sin, fec, arq = ce["codigo"], ce["teoria"], ce["sin_control"], ce["fec"], ce["arq"]
+    n, k, p = cod["n"], cod["k"], teo["p"]
+    HX = d["fuente"]["entropia"]
+    metodo = d["codificacion"]["metodo_elegido"]
+
+    st.subheader(f"Código de bloque lineal {cod['nombre']}")
+    st.markdown(f"El flujo comprimido ({metodo}) se parte en mensajes de **k = {k}** bits y a cada uno se le agregan "
+                f"**n − k = {n - k}** bits de paridad. Con esa redundancia el receptor puede **corregir** el bloque (FEC) "
+                "o sólo **detectar** el error y pedir que se lo envíen otra vez (ARQ).")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Tasa R = k/n", f"{cod['tasa']:.4f}", help=f"De cada bit enviado, {cod['tasa']:.3f} son del mensaje")
+    c2.metric("Distancia mínima d_min", f"{cod['d_min']}", help="Menor peso de una palabra del código distinta de cero")
+    c3.metric("Corrige / detecta", f"{cod['corrige']} / {cod['detecta']} bits",
+              help="Por bloque: como FEC corrige hasta t = ⌊(d_min − 1)/2⌋ errores; como ARQ detecta hasta d_min − 1. "
+                   "No las dos cosas a la vez: si corrige, un error de t + 1 bits puede corregirse mal sin avisar.")
+    c4.metric("Capacidad C = 1 − H_b(p)", f"{teo['capacidad']:.4f}",
+              delta="R < C" if teo["tasa_menor_capacidad"] else "R ≥ C",
+              delta_color="normal" if teo["tasa_menor_capacidad"] else "inverse",
+              help="Teorema de codificación de canal: con R < C existen códigos con error tan pequeño como se quiera")
+
+    nk = f"({n},{k})"
+    if cod["d_min"] >= cod["d_cota"]:
+        optimo = f"la mayor posible para un código {nk} (lo dicen las cotas de Singleton, Hamming y Griesmer)"
+    elif cod["d_mejor_probado"]:
+        optimo = (f"la mayor posible para un código {nk}: las cotas no descartan {cod['d_cota']}, pero el programa recorrió "
+                  "todas las matrices P con más distancia y no existe ninguna")
+    else:
+        optimo = (f"la mejor que encontró la búsqueda; las cotas no descartan hasta {cod['d_cota']} y no alcanzó a revisar "
+                  "todas las matrices")
+    if cod["construccion"] == "busqueda":
+        st.caption(f"Con n = {n} y k = {k} el programa buscó la matriz P. Su d_min = {cod['d_min']} es {optimo}.")
+    elif cod["d_min"] < cod["d_mejor"]:
+        st.caption(f"Esta P da d_min = {cod['d_min']}; con «n y k» en la barra lateral el programa encuentra un código {nk} "
+                   f"con d_min = {cod['d_mejor']}.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**Matrices del código**")
+        if n <= 15:
+            st.latex(matriz_latex("G", cod["G"], n - k))
+            st.latex(matriz_latex("H", cod["H"], n - k))
+        else:
+            st.code("G =\n" + "\n".join(cod["G"]) + "\n\nH =\n" + "\n".join(cod["H"]), language="text")
+        st.caption(("G·Hᵀ = 0 se cumple" if cod["GHt_cero"] else "G·Hᵀ ≠ 0: la matriz no es válida") +
+                   (". Código perfecto: cada síndrome corresponde a un error de hasta t bits." if cod["perfecto"] else "."))
+    with col_b:
+        st.markdown("**Codificación y decodificación** (sumas módulo 2)")
+        st.latex(r"c = [\,b \mid m\,] = m\,G \qquad G = [\,P \mid I_k\,]")
+        st.latex(r"H = [\,I_{n-k} \mid P^{T}\,] \qquad G\,H^{T} = 0")
+        st.latex(r"r = c + e \qquad s = r\,H^{T} = e\,H^{T}")
+        st.markdown("Si **s = 0** el bloque se acepta. Si no, FEC toma de la tabla de síndromes el error más probable ê "
+                    "(el de menor peso) y corrige ĉ = r + ê; ARQ descarta el bloque y pide que se repita.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown(f"**Estructura de la codificación** ({cod['total_palabras']:,} palabras)")
+        palabras = pd.DataFrame(cod["palabras"]).rename(columns={"m": "Mensaje m", "b": "Paridad b = mP",
+                                                                   "c": "Palabra c = [b | m]", "peso": "Peso"})
+        st.dataframe(palabras, hide_index=True, height=min(35 * (len(palabras) + 1) + 3, 400))
+        pesos = ", ".join(f"A{str(x['peso']).translate(SUB)} = {x['palabras']:,}" for x in cod["distribucion_pesos"])
+        st.caption((f"Se muestran las primeras {len(palabras)}. " if cod["total_palabras"] > len(palabras) else "") +
+                   f"Palabras por peso: {pesos}.")
+    with col_b:
+        st.markdown(f"**Estructura del síndrome** ({cod['total_sindromes']:,} síndromes)")
+        sindromes = pd.DataFrame(cod["sindromes"])
+        sindromes["Error que corrige"] = [("ninguno" if x["peso"] == 0 else f"bit {x['posicion']}" if x["peso"] == 1
+                                           else f"{x['peso']} bits") for _, x in sindromes.iterrows()]
+        st.dataframe(sindromes[["s", "e", "Error que corrige"]].rename(columns={"s": "Síndrome s", "e": "Error ê (líder)"}),
+                     hide_index=True, height=min(35 * (len(sindromes) + 1) + 3, 400))
+        if cod["total_sindromes"] > len(sindromes):
+            st.caption(f"Se muestran los primeros {len(sindromes)}.")
+
+    st.markdown("**Bloques transmitidos con FEC** (los primeros y los primeros que llegaron con error)")
+    st.dataframe(pd.DataFrame(fec["muestra"])[["bloque", "m", "c", "e", "r", "s", "e_est", "c_est", "m_est", "estado"]].rename(columns={
+        "bloque": "Bloque", "c": "c = mG", "e": "Error e", "r": "Recibido r", "s": "s = rHᵀ", "e_est": "ê",
+        "c_est": "ĉ = r + ê", "m_est": "m̂", "estado": "Resultado"}), hide_index=True)
+
+    # Original → comprimido → recuperado, con y sin control de error
+    st.subheader("Original, comprimido y recuperado")
+    estrategias = [("Sin control de error", sin), ("FEC (corrige)", fec), ("ARQ (detecta y repite)", arq)]
+    filas = []
+    for nombre, x in estrategias:
+        filas.append({
+            "Estrategia": nombre,
+            "Bits enviados": f"{x['bits_enviados']:,}",
+            "Agregados": f"{x['bits_enviados'] / x['bits_mensaje'] - 1:+.1%}" if x["bits_mensaje"] else "—",
+            "Errores canal": f"{x['errores_canal']:,}",
+            "Errados al final": f"{x['bits_erroneos']:,}",
+            "BER final": prob(x["ber_residual"]),
+            "I(X;Y) bit": f"{x['IXY_bit']:.6f}",
+            "I(X;Y) símbolo": f"{x['simbolos_IXY']:.4f}",
+            "Símbolos errados": f"{x['tasa_error_simbolo']:.2%}",
+            "Idéntico": "Sí" if x["identico"] else "No",
+        })
+    st.dataframe(pd.DataFrame(filas), hide_index=True)
+    st.caption("I(X;Y) bit: flujo comprimido enviado ↔ flujo recuperado. I(X;Y) símbolo: símbolos del archivo "
+               f"original ↔ símbolos del archivo recuperado, posición por posición; su máximo es H(X) = {HX:.4f} bits, cuando llega todo bien. "
+               "Si el decodificador se corre, lo que sigue cuenta como error aunque el contenido reaparezca unas posiciones más allá.")
+
+    graf = pd.DataFrame({"Estrategia": [e for e, _ in estrategias], "I": [x["simbolos_IXY"] for _, x in estrategias]})
+    graf["Texto"] = [f"{v:.4f} bits ({v / HX:.1%} de H)" if HX > 0 else f"{v:.4f} bits" for v in graf["I"]]
+    base = alt.Chart(graf).encode(
+        y=alt.Y("Estrategia:N", sort=list(graf["Estrategia"]), title=None, axis=alt.Axis(labelLimit=220)),
+        x=alt.X("I:Q", title="I(X;Y) original ↔ recuperado (bits/símbolo)", scale=alt.Scale(domain=[0, max(HX, 1e-9) * 1.25]),
+                axis=alt.Axis(grid=True, gridOpacity=0.3, tickCount=8)),
+        tooltip=["Estrategia:N", alt.Tooltip("Texto:N", title="I(X;Y)")])
+    barras = base.mark_bar(color=COLOR, cornerRadiusEnd=4, height=18)
+    textos = base.mark_text(align="left", dx=4, fontSize=11, color="#9aa0a6").encode(text="Texto:N")
+    regla = alt.Chart(pd.DataFrame({"H": [HX]})).mark_rule(strokeDash=[4, 3], color="#52514e").encode(
+        x="H:Q", tooltip=[alt.Tooltip("H:Q", title="H(X)", format=".4f")])
+    st.altair_chart((barras + textos + regla).properties(height=alt.Step(34)), width="stretch")
+
+    if p == 0:
+        st.info("Con p = 0 el canal no se equivoca y el código sólo agrega bits. Sube la probabilidad de error en la barra "
+                "lateral para comparar las tres estrategias.")
+    else:
+        puntos = []
+        if sin["bits_erroneos"]:
+            reduccion = 1 - fec["bits_erroneos"] / sin["bits_erroneos"]
+            puntos.append(f"FEC bajó los bits errados de {sin['bits_erroneos']:,} a {fec['bits_erroneos']:,} "
+                          f"({reduccion:.1%} menos) enviando {fec['bits_enviados'] / fec['bits_mensaje'] - 1:.0%} más bits.")
+        puntos.append(f"ARQ terminó con {arq['bits_erroneos']:,} bits errados después de {arq['retransmisiones']:,} "
+                      f"retransmisiones; aprovechó {arq['eficiencia']:.3f} bits de mensaje por bit enviado (FEC: {fec['eficiencia']:.3f}).")
+        if fec["bits_erroneos"] and metodo in ("Huffman", "LZW") and fec["tasa_error_simbolo"] > 0.01:
+            if metodo == "Huffman":
+                causa = ("Con Huffman los códigos tienen distinto largo: un bit errado hace leer mal unos pocos símbolos y el "
+                         "decodificador se vuelve a sincronizar, pero si leyó símbolos de más o de menos, todo lo que sigue "
+                         "queda corrido de su posición.")
+            else:
+                causa = ("Con LZW un bit errado cambia un código: esa frase sale mal, lo que sigue queda corrido de su "
+                         "posición y la entrada equivocada del diccionario repite el error cada vez que se usa.")
+            puntos.append(f"{causa} Por eso, comparando posición por posición, con sólo {fec['bits_erroneos']:,} bits errados "
+                          f"queda mal el {fec['tasa_error_simbolo']:.1%} de los símbolos. A un archivo comprimido no le basta "
+                          "con reducir los errores: tiene que llegar sin ninguno.")
+        elif metodo == "Uniforme" and fec["bits_erroneos"]:
+            puntos.append("Con la codificación uniforme un bit errado sólo daña su propio símbolo, así que el daño no se propaga.")
+        if teo["tasa_menor_capacidad"]:
+            puntos.append(f"R = {cod['tasa']:.3f} < C = {teo['capacidad']:.3f}: según el teorema de codificación de canal hay "
+                          "códigos de esta tasa con error tan pequeño como se quiera, pero necesitan bloques mucho más largos "
+                          f"que n = {n}.")
+        else:
+            puntos.append(f"R = {cod['tasa']:.3f} ≥ C = {teo['capacidad']:.3f}: ningún código de esta tasa puede dejar el error "
+                          "tan pequeño como se quiera.")
+        st.markdown("\n".join(f"- {x}" for x in puntos))
+
+    st.markdown("**Teoría y medición por bloque**")
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        st.latex(r"P_{\mathrm{FEC}}(\text{bloque mal}) = 1 - \sum_{w} \alpha_w\, p^{w}(1-p)^{n-w}")
+        st.latex(r"P(\text{error no detectado}) = \sum_{w \ge 1} A_w\, p^{w}(1-p)^{n-w}")
+        st.latex(r"E[\text{envíos}] = \frac{1-q^{M}}{1-q}, \qquad q = P(s \ne 0)")
+        st.caption("α_w: síndromes cuyo error ê tiene peso w. A_w: palabras del código con peso w. M: envíos máximos.")
+    with col_b:
+        bloques_fec, bloques_arq, envios = max(1, fec["bloques"]), max(1, arq["bloques"]), max(1, arq["transmisiones"])
+        filas_t = [
+            ("Sin control: bloque de k bits con error", prob(teo["p_bloque_sin_control"]), "—"),
+            ("FEC: bloque mal decodificado", prob(teo["p_bloque_fec"]),
+             prob((fec["bloques_mal_corregidos"] + fec["bloques_no_detectados"]) / bloques_fec)),
+            ("ARQ: error no detectado por envío", prob(teo["p_no_detectado"]), prob(arq["bloques_no_detectados"] / envios)),
+            ("ARQ: envíos por bloque", f"{teo['transmisiones_esperadas']:.4f}", f"{arq['transmisiones'] / bloques_arq:.4f}"),
+            ("ARQ: bloque entregado con error", prob(teo["p_bloque_arq"]),
+             prob((arq["bloques_no_detectados"] + arq["bloques_fallidos"]) / bloques_arq)),
+            ("ARQ: eficiencia R / E[envíos]", f"{teo['eficiencia_arq']:.4f}", f"{arq['eficiencia']:.4f}"),
+        ]
+        st.dataframe(pd.DataFrame(filas_t, columns=["Por bloque", "Teórico", "Medido"]), hide_index=True,
+                     height=35 * (len(filas_t) + 1) + 3)
+
+    st.markdown("**ARQ: bloques que se tuvieron que repetir**")
+    a1, a2, a3 = st.columns(3)
+    a1.metric("Retransmisiones", f"{arq['retransmisiones']:,}", help=f"{arq['transmisiones']:,} envíos para {arq['bloques']:,} bloques")
+    a2.metric("Errores no detectados", f"{arq['bloques_no_detectados']:,}", help="El error era una palabra del código: s = 0")
+    a3.metric("Bloques que agotaron los envíos", f"{arq['bloques_fallidos']:,}", help=f"Máximo {teo['arq_max']} envíos por bloque")
+    st.dataframe(pd.DataFrame(arq["muestra"])[["bloque", "m", "c", "e", "r", "s", "intentos", "estado"]].rename(columns={
+        "bloque": "Bloque", "c": "c = mG", "e": "Error (1.er envío)", "r": "Recibido (1.er envío)", "s": "s (1.er envío)",
+        "intentos": "Envíos", "estado": "Resultado"}), hide_index=True)
+    st.caption("Se supone repetición selectiva ideal: los avisos del receptor (ACK si s = 0, NAK si no) llegan sin errores "
+               "y no se cuenta el tiempo de espera, así que la eficiencia es la mejor que puede tener ARQ con este código.")
+
+    b1, b2 = st.columns(2)
+    for col, x, nombre, clave in ((b1, fec, "FEC", "dl_fec"), (b2, arq, "ARQ", "dl_arq")):
+        with col:
+            if x["identico"]:
+                st.caption(f"Con {nombre} el archivo recuperado es idéntico al original.")
+            else:
+                boton_descarga(x["archivo"], f"Descargar recuperado con {nombre}",
+                               f"{nombre.lower()}_{Path(res['archivo']).name}", clave)
+
+    st.markdown("**En 5G y 6G**")
+    st.markdown("Primero se comprime y después se protege: es el orden que respalda el teorema de separación fuente-canal "
+                "de Shannon. 5G NR hace lo mismo (3GPP TS 38.212):")
+    st.markdown("- Los datos van con códigos **LDPC** y la señalización con códigos **Polar**, de miles de bits por bloque.\n"
+                "- Los mensajes de control cortos (3 a 11 bits) usan un código de bloque lineal (32, K) que se calcula "
+                "con c = m·G, usando la tabla de 32 × 11 que fija la norma; 1 bit se repite y 2 bits llevan "
+                "un bit de paridad.\n"
+                "- Un **CRC** detecta los errores que quedan y **HARQ** combina corrección y retransmisión.\n\n"
+                "El cálculo de la red real de la pestaña 9 ya incluye el CRC y los bloques LDPC de esa norma. Para 6G, "
+                "3GPP parte de los mismos LDPC y Polar y en 2026 acordó agregar un nuevo grafo base de LDPC; el resto sigue "
+                "en estudio.")
+
+
+def entropia(v):
+    v = np.asarray(v, dtype=float).ravel()
+    v = v[v > 0]
+    return float(-(v * np.log2(v)).sum())
+
+
+def calculadora_canal_discreto():
+    st.subheader("Canal discreto con cualquier matriz P(y|x)")
+    st.caption("Escribe la distribución de entrada P(X) y la matriz de transición P(y|x) de cualquier canal discreto sin "
+               "memoria; cada fila debe sumar 1.")
+    c1, c2, _ = st.columns([1, 1, 2])
+    J = int(c1.number_input("Entradas J", min_value=2, max_value=8, value=2, key="canal_J"))
+    K = int(c2.number_input("Salidas K", min_value=2, max_value=8, value=3, key="canal_K"))
+    xs = [f"x{j}".translate(SUB) for j in range(J)]
+    ys = [f"y{i}".translate(SUB) for i in range(K)]
+    if (J, K) == (2, 3):
+        valores = [[0.6, 0.7, 0.2, 0.1], [0.4, 0.1, 0.3, 0.6]]
+    else:
+        valores = [[round(1 / J, 6)] + [round(1 / K, 6)] * K for _ in range(J)]
+    columnas = ["P(x)"] + [f"P({y}|x)" for y in ys]
+    tabla = st.data_editor(pd.DataFrame(valores, index=xs, columns=columnas), key=f"canal_{J}_{K}",
+                           column_config={c: st.column_config.NumberColumn(c, min_value=0.0, max_value=1.0, step=0.0001,
+                                                                           format="%.4f") for c in columnas})
+    datos = tabla.to_numpy(dtype=float)
+    if np.isnan(datos).any():
+        st.warning("Hay celdas vacías.")
+        return
+    px, T = datos[:, 0], datos[:, 1:]
+    problemas = []
+    if abs(px.sum() - 1) > 1e-6:
+        problemas.append(f"P(x) suma {px.sum():.6f}")
+    problemas += [f"la fila {x} suma {T[j].sum():.6f}" for j, x in enumerate(xs) if abs(T[j].sum() - 1) > 1e-6]
+    if problemas:
+        st.warning("Cada distribución debe sumar 1: " + "; ".join(problemas) + ".")
+        return
+
+    conjunta = px[:, None] * T
+    py = conjunta.sum(axis=0)
+    HX, HY, HXY = entropia(px), entropia(py), entropia(conjunta)
+    HYdX = float(sum(px[j] * entropia(T[j]) for j in range(J)))
+    HXdY = HXY - HY
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        st.latex(r"P(x_j, y_k) = P(y_k|x_j)\,P(x_j) \qquad P(x_j|y_k) = \frac{P(x_j, y_k)}{P(y_k)}")
+        st.markdown("**P(x, y)** y en la última fila **P(y)**")
+        st.dataframe(pd.DataFrame(np.vstack([conjunta, py]), index=xs + ["P(y)"], columns=ys).style.format("{:.6f}"))
+        st.markdown("**P(x|y)**")
+        con_y = np.divide(conjunta, py, out=np.zeros_like(conjunta), where=py > 0)
+        st.dataframe(pd.DataFrame(con_y, index=xs, columns=ys).style.format("{:.6f}"))
+    with col_b:
+        tabla_medidas([
+            ("H(X)", f"{HX:.7f} bits"), ("H(Y)", f"{HY:.7f} bits"), ("H(X,Y)", f"{HXY:.7f} bits"),
+            ("H(X|Y)", f"{HXdY:.7f} bits"), ("H(Y|X)", f"{HYdX:.7f} bits"),
+            ("I(X;Y) = H(X) − H(X|Y)", f"{HX - HXdY:.7f} bits"),
+            ("I(Y;X) = H(Y) − H(Y|X)", f"{HY - HYdX:.7f} bits"),
+            ("I(X;Y) = H(X) + H(Y) − H(X,Y)", f"{HX + HY - HXY:.7f} bits"),
+        ])
+        st.caption("Las tres formas dan lo mismo: la información mutua es simétrica, I(X;Y) = I(Y;X), y nunca es negativa.")
+
+
 # ---------------------------------------------------------------- interfaz
 
 LIMITE_AUTOMATICO = 32 * 1024 * 1024  # hasta este tamaño el archivo se procesa solo al cambiar algo
 
 st.title("Codificación, compresión y reconstrucción adaptable 5G/6G")
-st.caption("Fuente → Codificación → Compresión → Canal → Reconstrucción · símbolos de N bits (8 a 32768)")
+st.caption("Fuente → Codificación → Compresión → Control de error → Canal → Reconstrucción · símbolos de N bits (8 a 32768)")
 
 if not compilar_si_hace_falta():
     st.stop()
@@ -326,6 +608,34 @@ with st.sidebar:
     p_error = st.number_input("Probabilidad de error de bit p", min_value=0.0, max_value=0.5, value=0.0, step=0.0001,
                               format="%.4f", help="Canal binario simétrico: cada bit se invierte con probabilidad p. 0 = canal ideal.")
 
+    st.header("Control de error")
+    forma_fec = st.radio("Código de bloque", ["n y k", "Matriz P", "Ninguno"], horizontal=True,
+                         help="Se agregan n − k bits de paridad a cada mensaje de k bits del flujo comprimido. "
+                              "Ninguno omite esta etapa.")
+    if forma_fec == "n y k":
+        st.session_state.setdefault("fec_n", 7)
+        st.session_state.setdefault("fec_k", 4)
+        col_n, col_k = st.columns(2)
+        n_fec = int(col_n.number_input("n", min_value=2, max_value=24, step=1, key="fec_n",
+                                       help="Bits de cada palabra codificada (2 a 24)"))
+        k_min, k_max = max(1, n_fec - 16), min(20, n_fec - 1)
+        st.session_state["fec_k"] = min(max(int(st.session_state["fec_k"]), k_min), k_max)
+        k_fec = int(col_k.number_input("k", min_value=k_min, max_value=k_max, step=1, key="fec_k",
+                                       help=f"Bits de mensaje por palabra ({k_min} a {k_max} con n = {n_fec})"))
+        especificacion_fec = f"{n_fec},{k_fec}"
+        r_fec = n_fec - k_fec
+        st.caption(f"{r_fec} bit{'s' if r_fec != 1 else ''} de paridad · tasa R = {k_fec / n_fec:.3f}. El programa elige la matriz P de "
+                   "mayor distancia mínima.")
+    elif forma_fec == "Matriz P":
+        filas_p = st.text_input("Filas de P", "110,101,011,111",
+                                help="k filas de n − k bits separadas por coma. G = [P | I_k] y H = [I_(n−k) | Pᵀ]. "
+                                     "El valor inicial es un código de Hamming (7,4).")
+        especificacion_fec = "P:" + filas_p.replace(" ", "")
+    else:
+        especificacion_fec = "ninguno"
+    arq_max = st.number_input("ARQ: envíos máximos por bloque", min_value=1, max_value=64, value=8,
+                              help="Si después de estos envíos el síndrome sigue sin ser cero, el bloque se entrega como llegó.")
+
     with st.expander("Opciones de visualización"):
         pasos = st.slider("Pasos de LZW a mostrar", 20, 1000, 200, step=20)
 
@@ -336,6 +646,7 @@ def procesar(ruta, parametros):
     salida.mkdir(parents=True, exist_ok=True)
     with st.spinner(f"Procesando {ruta.name} con N = {n_bits} bits..."):
         rc, out, err = ejecutar([str(ruta), str(n_bits), "--metodo", metodo, "--p", repr(float(p_error)),
+                                 "--fec", especificacion_fec, "--arq-max", str(int(arq_max)),
                                  "--traza", str(pasos), "--salida", str(salida), "--json", str(ruta_json)])
     if rc not in (0, 3) or not ruta_json.exists():
         st.session_state["resultado"] = {"parametros": parametros, "error": err or out or "Sin mensaje de error"}
@@ -355,7 +666,8 @@ if estado.st_size == 0:
 
 # Los resultados se recalculan cuando cambia el archivo o cualquier parámetro, así lo que se ve siempre
 # corresponde a lo elegido en la barra lateral
-parametros = (str(ruta_fuente), estado.st_size, estado.st_mtime_ns, n_bits, metodo, float(p_error), pasos)
+parametros = (str(ruta_fuente), estado.st_size, estado.st_mtime_ns, n_bits, metodo, float(p_error), especificacion_fec,
+              int(arq_max), pasos)
 res = st.session_state.get("resultado")
 if not res or res["parametros"] != parametros:
     if estado.st_size <= LIMITE_AUTOMATICO or st.sidebar.button("Procesar archivo", type="primary", width="stretch"):
@@ -387,7 +699,7 @@ m5.metric("Comprimido", tam(comp["bytes"]), delta=f"{-100 * comp['ahorro']:+.1f}
           help=f"Original: {tam(f['tamano_original'])}")
 
 tabs = st.tabs(["1 · Fuente", "2 · Codificación", "3 · Compresión", "4 · Reconstrucción", "5 · Canal e I(X;Y)",
-                "6 · Comparar N", "7 · Agente IA", "8 · 5G / 6G", "Consola"])
+                "6 · Control de error", "7 · Comparar N", "8 · Agente IA", "9 · 5G / 6G", "Consola"])
 
 # ---- 1. Fuente
 with tabs[0]:
@@ -568,8 +880,15 @@ with tabs[4]:
                          hide_index=True)
         boton_descarga(k.get("archivo"), "Descargar archivo recibido con ruido", f"canal_{Path(res['archivo']).name}", "dl_canal")
 
-# ---- 6. Comparar N
+    st.divider()
+    calculadora_canal_discreto()
+
+# ---- 6. Control de error
 with tabs[5]:
+    seccion_control_error(d, res)
+
+# ---- 7. Comparar N
+with tabs[6]:
     st.subheader("Adaptabilidad: el mismo archivo con distintos N")
     seleccion = st.multiselect("Valores de N", VALORES_N, default=VALORES_N)
     if st.button("Comparar", type="primary", disabled=not seleccion):
@@ -608,15 +927,15 @@ with tabs[5]:
             "total_huffman": "Bytes Huffman", "total_lzw": "Bytes LZW", "mejor": "Mejor", "razon_mejor": "Razón",
             "tiempo_ms": "Tiempo (ms)"}), hide_index=True)
 
-# ---- 7. Agente de IA
-with tabs[6]:
+# ---- 8. Agente de IA
+with tabs[7]:
     seccion_agente(res)
 
-# ---- 8. Enlace 5G / 6G
-with tabs[7]:
+# ---- 9. Enlace 5G / 6G
+with tabs[8]:
     seccion_enlace(res, d)
 
 # ---- Consola
-with tabs[8]:
+with tabs[9]:
     st.code(res["consola"][-20000:] or "(sin salida)", language="text")
     st.caption("Tiempos (ms): " + ", ".join(f"{a} {b:,.0f}" for a, b in d["tiempos_ms"].items()))

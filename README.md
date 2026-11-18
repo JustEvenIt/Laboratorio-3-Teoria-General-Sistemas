@@ -16,7 +16,7 @@ El código fuente está estructurado siguiendo las mejores prácticas de C++, se
 
 ## Módulos Principales
 
-El flujo de procesamiento sigue la cadena **Fuente → Codificación → Compresión → Canal → Reconstrucción**:
+El flujo de procesamiento sigue la cadena **Fuente → Codificación → Compresión → Control de error → Canal → Reconstrucción**:
 
 1.  **ProcesadorFuente**: lee el archivo en modo binario y lo divide en bloques exactos de $N$ bits ($N$ múltiplo de 8, de 8 a 32768). El último bloque se completa con ceros y el tamaño original se guarda para quitarlos al reconstruir. Construye el alfabeto (símbolos distintos) con una tabla hash, calcula $P(x_k)$ y detecta el tipo de fuente (audio, video, imagen, texto) por la firma del archivo.
 
@@ -28,7 +28,22 @@ El flujo de procesamiento sigue la cadena **Fuente → Codificación → Compres
 
 3.  **Canal**: canal binario simétrico (discreto, sin memoria) con probabilidad de error $p$. Calcula la matriz de transición $P(y_k|x_j)$, la conjunta $P(x_j,y_k)$, $P(y_k)$, $H(Y|X)$, $I(X;Y)$ y la capacidad $C = 1 - H_b(p)$, tanto en teoría como medidas en la transmisión simulada.
 
-4.  **Sistema**: métricas de Shannon:
+4.  **ControlError**: código de bloque lineal sistemático (n, k): $c = [b \mid m] = mG$,
+    $G = [P \mid I_k]$, $H = [I_{n-k} \mid P^T]$, $GH^T = 0$ y síndrome $s = rH^T$ con $r = c + e$. El código se define con
+    **n y k** o con una $P$ cualquiera. Con n y k el programa busca la $P$ de mayor distancia mínima y dice si es la mayor
+    posible: porque llega a las cotas de Singleton, Hamming y Griesmer o porque recorrió todas las matrices con más distancia sin
+    encontrar ninguna. Así salen, por ejemplo, la
+    repetición (5,1), Hamming (15,11), Hamming extendido (8,4) y Golay (23,12). Calcula la distancia mínima, la distribución de
+    pesos y la tabla de síndromes (cada síndrome con su error de menor peso). El flujo comprimido pasa por el mismo BSC de dos
+    formas:
+    - _FEC_: el receptor corrige cada bloque con la tabla de síndromes.
+    - _ARQ_: el receptor sólo detecta ($s \neq 0$) y pide repetir el bloque, hasta un máximo de envíos (canal de retorno ideal).
+
+    Para cada caso mide los errores que quedan, la información mutua entre el flujo comprimido enviado y el recuperado, y la
+    información mutua por símbolo entre el archivo **original** y el **recuperado**; además compara con los valores teóricos
+    ($P$ de bloque mal decodificado, de error no detectado y envíos esperados) y con la capacidad del canal ($R < C$).
+
+5.  **Sistema**: métricas de Shannon:
     - **Cantidad de información** $I(x_k) = -\log_2 P(x_k)$ y **entropía** $H(X)$.
     - **Divergencia KL** $D(P\|U) = N - H$ respecto a la fuente uniforme.
     - **Varianza de la codificación** $\sigma^2 = \sum_k P_k (L_k - \bar L)^2$, longitud media $\bar L$ y eficiencia $H/\bar L$.
@@ -54,7 +69,7 @@ las reconstrucciones idénticas.
 
 ## Transmisión por 5G NR y requisitos de 5G y 6G
 
-La pestaña **8 · 5G / 6G** muestra, sin tecnicismos, cuánto tardaría en llegar el archivo comprimido (el del agente si se ejecutó)
+La pestaña **9 · 5G / 6G** muestra, sin tecnicismos, cuánto tardaría en llegar el archivo comprimido (el del agente si se ejecutó)
 frente al original: con las velocidades y la demora que exigen los estándares de 5G (IMT-2020) y 6G (IMT-2030), y en una red 5G
 real de 3.5 GHz con buena señal, además de una tabla con lo que pide cada estándar. Por debajo, el núcleo C++ calcula la red real
 con las normas de 3GPP (el detalle completo se obtiene con `--enlace` desde la terminal):
@@ -85,9 +100,10 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-En la barra lateral se elige el archivo (de `data/`, incluidas sus subcarpetas, o subido), N, el método y el ruido del canal;
+En la barra lateral se elige el archivo (de `data/`, incluidas sus subcarpetas, o subido), N, el método, el ruido del canal y
+el código de control de error;
 los resultados se recalculan solos al cambiar cualquiera de ellos (archivos de más de 32 MB piden confirmar con **Procesar
-archivo**). El agente (pestaña 7) se ejecuta con su botón; la pestaña 5G/6G se calcula sola.
+archivo**). El agente (pestaña 8) se ejecuta con su botón; la pestaña 5G/6G se calcula sola.
 
 La interfaz compila el núcleo automáticamente con `g++` si el ejecutable no existe o si cambió el código. Para compilarlo a mano:
 
@@ -99,6 +115,8 @@ Uso desde la terminal:
 
 ```bash
 ./codificador_6g.exe data/archivo.mp3 1024 --metodo auto --p 0.001 --salida data/salida/prueba --json resultados.json
+./codificador_6g.exe data/archivo.txt 8 --p 0.01 --fec 7,4 --arq-max 8 --json resultados.json   # código (n,k)
+./codificador_6g.exe data/archivo.txt 8 --p 0.01 --fec P:1111 --json resultados.json   # P propia: (5,1)
 ./codificador_6g.exe data/archivo.mp3 --barrido 8,16,32,64,128,256,512,1024,2048 --json barrido.json
 ./codificador_6g.exe data/archivo.mp3 --agente --salida data/salida/agente --json agente.json
 ./codificador_6g.exe data/archivo.mp3 --enlace --comprimido data/salida/agente/agente.ti6g --snr 20 --capas 4 --servicio embb --json enlace.json

@@ -6,13 +6,14 @@ el resultado se vea claro. Los números que aparecen salieron del propio program
 ## 1. Qué hace el programa (en una frase)
 
 > Toma cualquier archivo (texto, imagen, audio, video), lo trata como una **fuente de información**, lo **codifica y comprime**,
-> lo pasa por un **canal con ruido**, lo **reconstruye** y mide en cada paso lo que vimos en clase. Un **agente de inteligencia
+> lo **protege con un código de control de error**, lo pasa por un **canal con ruido**, lo **reconstruye** y mide en cada paso lo
+> que define la teoría de la información. Un **agente de inteligencia
 > artificial** elige la mejor forma de comprimirlo y al final se ve **cuánto tardaría en llegar por 5G y 6G**.
 
 El recorrido es siempre el mismo:
 
 ```
-Fuente  →  Codificación  →  Compresión  →  Canal  →  Reconstrucción
+Fuente  →  Codificación  →  Compresión  →  Control de error  →  Canal  →  Reconstrucción
 ```
 
 El núcleo está escrito en C++ (por velocidad) y la interfaz en Python con Streamlit.
@@ -25,6 +26,8 @@ El núcleo está escrito en C++ (por velocidad) y la interfaz en Python con Stre
    - **Tamaño de símbolo N**: cuántos bits forman cada símbolo (de 8 a 32 768).
    - **Método**: Uniforme, Huffman, LZW o *Adaptable* (prueba los tres y se queda con el más pequeño).
    - **Probabilidad de error p**: ruido del canal (0 = canal perfecto).
+   - **Control de error**: **n y k** del código de bloque (el programa elige la matriz P) o una matriz P propia, y cuántas veces
+     puede ARQ repetir un bloque.
 3. Los resultados se recalculan solos al cambiar cualquier opción. Los archivos de más de 32 MB piden confirmar con
    *Procesar archivo*.
 
@@ -65,7 +68,7 @@ media L̄, varianza σ², eficiencia H/L̄ y la desigualdad de Kraft.
 - **Huffman**: códigos cortos para los símbolos frecuentes. Su L̄ queda muy cerca de H.
 - **Varianza σ² = Σ P_k (L_k − L̄)²**: dos códigos pueden tener la misma longitud media y distinta varianza.
 
-**Ejemplo.** `ejemplo_varianza_huffman.txt` reproduce el ejemplo de clase, P = {0.4, 0.2, 0.2, 0.1, 0.1}:
+**Ejemplo.** `ejemplo_varianza_huffman.txt` reproduce el ejemplo clásico, P = {0.4, 0.2, 0.2, 0.1, 0.1}:
 
 | Código | L̄ | σ² |
 |---|---|---|
@@ -105,7 +108,59 @@ teórica y la medida, la información mutua y la capacidad.
 
 **Ejemplo.** Poner p = 0.01: la capacidad baja a C = 0.919 bits por uso, y la I(X;Y) medida queda prácticamente en ese valor.
 
-### 6 · Comparar N
+Al final está una **calculadora de canal discreto**: se escribe P(X) y la matriz de transición P(y|x) de cualquier tamaño, y
+calcula P(x, y), P(y), P(x|y), las entropías y la información mutua de tres formas: H(X) − H(X|Y), H(Y) − H(Y|X) y
+H(X) + H(Y) − H(X,Y).
+
+**Ejemplo.** Con los valores iniciales (P(X) = {0.6, 0.4} y una matriz de 2 × 3) las tres formas dan **0.3183070 bits**: la
+información mutua es simétrica, I(X;Y) = I(Y;X), y nunca es negativa.
+
+### 6 · Control de error
+
+**Qué muestra.** El flujo comprimido protegido con un **código de bloque lineal (n, k)**: cada mensaje de k bits lleva n − k bits
+de paridad. Se ven las matrices G = [P | I_k] y H = [I_(n−k) | Pᵀ], la tabla de todas las palabras del código (estructura de la
+codificación), la tabla de síndromes (estructura del síndrome) y los primeros bloques que llegaron con error, con m, c = mG, el
+error e, lo recibido r, el síndrome s = rHᵀ y la corrección.
+
+Después compara tres formas de mandar el mismo archivo por el mismo canal:
+- **Sin control de error**.
+- **FEC**: el receptor corrige con la tabla de síndromes.
+- **ARQ**: el receptor sólo detecta (s ≠ 0) y pide que se repita el bloque.
+
+Para cada una da los bits enviados, los errores que quedan y la **información mutua entre el archivo original y el recuperado**.
+
+**Qué decir.**
+- "Control de error es agregar redundancia controlada: la compresión la quita y el código la vuelve a poner, pero ordenada."
+- "Si s = 0 el bloque se acepta; si no, hay error. FEC lo corrige con el error más probable; ARQ pide que lo repitan."
+- "El Hamming (7,4) tiene d_min = 3: corrige 1 error y detecta 2 por bloque. Es perfecto: sus 8 síndromes son exactamente
+  'sin error' y los 7 errores de un bit."
+- "Un archivo comprimido no tolera errores. Con Huffman un bit errado daña pocos símbolos, pero el decodificador puede leer
+  de más o de menos y todo lo que sigue queda corrido de su posición. Con LZW, además, la entrada equivocada del diccionario
+  repite el error cada vez que se usa."
+- "Primero se comprime y después se protege: es el orden que respalda el teorema de separación fuente-canal de Shannon, y es
+  lo que hace 5G."
+- "n y k solos no definen el código: lo define P. Con n y k el programa busca la P de mayor distancia mínima. Con (23,12)
+  encuentra el código de Golay, que corrige 3 errores por bloque."
+
+**Ejemplo.** `don_quijote.txt`, N = 8, p = 0.001, Hamming (7,4):
+
+| | Bits enviados | Bits errados al final | Símbolos errados | I(X;Y) original ↔ recuperado |
+|---|---|---|---|---|
+| Sin control | 6 335 037 | 6 369 | 93.4 % | 0.003 de 4.527 bits |
+| FEC | 11 086 320 (+75 %) | 60 | 91.2 % | 0.017 bits |
+| ARQ | 11 164 517 (+76 %) | 0 | 0 % (archivo idéntico) | 4.527 bits |
+
+FEC quita el 99 % de los errores, pero con los 60 que quedan el 91 % de los símbolos ya no está en su posición: LZW corre el
+texto y repite los errores del diccionario. ARQ lo entrega idéntico con 11 171 retransmisiones. Los porcentajes se cuentan
+posición por posición; en una prueba con Huffman y 208 bits errados, el 95 % del texto reaparecía intacto, a lo sumo 5 bytes
+fuera de su lugar. Con **n = 5, k = 1** (repetición) FEC también lo deja idéntico, pero envía 5 veces más bits. Para contrastar:
+`sensores_trafico.csv` con método **Uniforme** pierde sólo el 0.6 % de los símbolos sin control, porque en un código de longitud
+fija cada error se queda en su propio símbolo.
+
+La tabla **Teoría y medición** compara lo simulado con las fórmulas del código (por ejemplo, ARQ: 1.0070 envíos por bloque
+esperados y 1.0071 medidos).
+
+### 7 · Comparar N
 
 **Qué muestra.** El mismo archivo con todos los valores de N: entropía por bit, símbolos distintos, varianza y compresión.
 
@@ -114,7 +169,7 @@ hay que guardarlos en la cabecera. Por eso existe un N óptimo para cada archivo
 
 **Ejemplo.** `7341-minimalista.jpg`: el mejor es N = 256 con LZW.
 
-### 7 · Agente IA
+### 8 · Agente IA
 
 **Qué muestra.** Un agente que **elige la mejor combinación de método y N** (27 opciones: 3 métodos × 9 valores de N) para el
 archivo, cómo aprendió y la comprobación contra las 27 combinaciones.
@@ -135,7 +190,7 @@ archivo, cómo aprendió y la comprobación contra las 27 combinaciones.
 **Qué señalar.** La decisión en verde, la gráfica de qué combinación usó en cada bloque y el mapa de las 27 combinaciones con la
 elegida resaltada.
 
-### 8 · 5G / 6G
+### 9 · 5G / 6G
 
 **Qué muestra.** Cuánto tardaría en llegar el archivo **sin comprimir** y **comprimido** según los estándares:
 
@@ -187,18 +242,21 @@ Para 6G se usa el valor medio de su rango.
 - **El mismo contenido comprimido y sin comprimir**: la captura de pantalla en PNG (en `data/`) no baja nada porque el formato PNG
   ya está comprimido; la misma captura en BMP baja a la mitad. Lo mismo pasa con MP3, JPG y ZIP.
 
-## 6. Orden sugerido para la demostración (unos 12 minutos)
+## 6. Orden sugerido para la demostración (unos 14 minutos)
 
 1. **Introducción** (1 min): la frase de la sección 1 y el recorrido Fuente → … → Reconstrucción.
 2. **Fuente** con `ejemplo_varianza_huffman.txt` (2 min): H = 2.12 frente a 8 bits.
 3. **Codificación** con el mismo archivo (2 min): varianza 0.16 frente a 1.36.
 4. **Compresión y reconstrucción** con `data_prueba_secuencial.txt`, N = 16 (1.5 min): LZW y reconstrucción idéntica.
-5. **Canal** con p = 0.01 (1.5 min): matriz de transición, I(X;Y) y capacidad. Volver p a 0.
-6. **Contraste** entre `mapa_interseccion.bmp` (99 %) y `foto_con_ruido.bmp` (3 %) (1 min).
-7. **Agente IA** con `sensores_trafico.csv` (2 min): decisión, gráfica por bloques, mapa de las 27 combinaciones.
-8. **5G / 6G** con la captura en BMP (1 min): la red 5G real pasa de 41 ms a 22.5 ms.
-9. **Cierre** (30 s): entropía = límite de la compresión, varianza = criterio entre códigos igual de eficientes, información mutua =
-   lo que sobrevive al canal, agente = decide solo, 5G/6G = menos bits, menos tiempo.
+5. **Canal** con p = 0.01 (1.5 min): matriz de transición, I(X;Y) y capacidad. Mostrar al final la calculadora del canal discreto.
+6. **Control de error** con `don_quijote.txt` y p = 0.001 (2 min): matrices G y H, tabla de síndromes, un bloque corregido y la
+   comparación sin control / FEC / ARQ. Volver p a 0.
+7. **Contraste** entre `mapa_interseccion.bmp` (99 %) y `foto_con_ruido.bmp` (3 %) (1 min).
+8. **Agente IA** con `sensores_trafico.csv` (2 min): decisión, gráfica por bloques, mapa de las 27 combinaciones.
+9. **5G / 6G** con la captura en BMP (1 min): la red 5G real pasa de 41 ms a 22.5 ms.
+10. **Cierre** (30 s): entropía = límite de la compresión, varianza = criterio entre códigos igual de eficientes, información
+    mutua = lo que sobrevive al canal, control de error = redundancia que se agrega a propósito, agente = decide solo, 5G/6G =
+    menos bits, menos tiempo.
 
 ## 7. Preguntas frecuentes
 
@@ -212,10 +270,21 @@ Para 6G se usa el valor medio de su rango.
 | ¿Los tiempos de 5G son reales? | Los de "velocidad garantizada" y "máxima" usan los valores de la UIT. La "red 5G real" se calcula con las normas de 3GPP para una red de 100 MHz con buena señal. |
 | ¿6G ya existe? | No como estándar terminado: se usan los objetivos que fijó la UIT (IMT-2030). |
 | ¿Por qué C++? | Por velocidad: un archivo de 200 MB se procesa en unos 20 segundos. |
+| ¿Comprimir y luego agregar bits no es contradictorio? | No: la compresión quita la redundancia que no sirve y el código agrega poca redundancia, ordenada para encontrar errores. |
+| ¿FEC o ARQ? | FEC no necesita canal de retorno ni espera, pero gasta bits siempre. ARQ sólo repite lo que llegó mal, pero necesita el aviso del receptor y agrega demora. 5G combina las dos (HARQ). |
+| ¿Por qué FEC no salvó el archivo comprimido? | El (7,4) corrige un error por bloque; los bloques con dos o más se decodifican mal. Con Huffman o LZW basta un bit errado para que lo que sigue quede corrido de posición, y con LZW el error se repite. |
+| ¿Por qué no basta con dar n y k? | Hay muchas matrices P para el mismo (n, k) y no todas corrigen lo mismo. El programa busca la de mayor distancia mínima y dice si es la mayor posible, por las cotas de Singleton, Hamming y Griesmer o porque revisó todas las matrices con más distancia. |
+| ¿Qué códigos usa 5G? | LDPC para los datos y Polar para la señalización (3GPP TS 38.212), con bloques de miles de bits. Para mensajes de control de 3 a 11 bits usa un código de bloque (32, K) que se calcula con c = m·G. |
+| ¿Y 6G? | 3GPP parte de los mismos LDPC y Polar; en 2026 acordó agregar un nuevo grafo base de LDPC y el resto sigue en estudio. |
 
 ## 8. Supuestos y límites
 
-- El canal de la pestaña 5 es un **canal binario simétrico simulado** (errores independientes).
+- El canal de la pestaña 5 es un **canal binario simétrico simulado** (errores independientes). La pestaña 6 usa el mismo canal,
+  con la misma p y la misma semilla.
+- En **ARQ** se supone repetición selectiva ideal: los avisos del receptor (ACK/NAK) llegan sin errores y no se cuenta la espera.
+  Si un bloque agota los envíos, se entrega como llegó.
+- La **información mutua por símbolo** y los **símbolos errados** se calculan posición por posición: miden si el archivo se
+  reconstruye tal cual, no si el contenido sigue siendo legible.
 - La **red 5G real** supone buena señal (20 dB), 4 antenas y la banda de 3.5 GHz con 100 MHz; no incluye las cabeceras de los
   protocolos de red.
 - Los valores de **6G** son objetivos de investigación de la UIT, no una norma técnica terminada.

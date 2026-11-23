@@ -8,3 +8,8 @@ gatherUsageStats = false
 [client]
 # Sin el botón "Deploy" ni el menú de desarrollador
 toolbarMode = "minimal"
+
+[theme]
+# Tema claro con fondo blanco, aunque el sistema esté en modo oscuro
+base = "light"
+backgroundColor = "#ffffff"

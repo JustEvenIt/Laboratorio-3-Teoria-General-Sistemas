@@ -8,7 +8,8 @@ el resultado se vea claro. Los números que aparecen salieron del propio program
 > Toma cualquier archivo (texto, imagen, audio, video), lo trata como una **fuente de información**, lo **codifica y comprime**,
 > lo **protege con un código de control de error**, lo pasa por un **canal con ruido**, lo **reconstruye** y mide en cada paso lo
 > que define la teoría de la información. Un **agente de inteligencia
-> artificial** elige la mejor forma de comprimirlo y al final se ve **cuánto tardaría en llegar por 5G y 6G**.
+> artificial** elige la mejor forma de comprimirlo y al final el archivo se **transmite bit por bit por una capa física de 5G y
+> 6G**, con el código LDPC de la norma, modulación QAM, ruido y retransmisiones.
 
 El recorrido es siempre el mismo:
 
@@ -208,6 +209,44 @@ Además muestra una **red 5G real** en la banda de 3.5 GHz (la más usada), calc
 - "Con archivos pequeños casi no cambia nada porque domina la demora fija de la red; con archivos grandes la compresión ahorra
   mucho tiempo."
 
+### 10 · Simulación 5G/6G
+
+**Qué muestra.** El archivo comprimido transmitido bit por bit por una capa física como la de 5G NR:
+
+```
+bloques de transporte → CRC → código de canal → adaptación de tasa → QPSK…1024QAM → canal con ruido → LLR
+→ decodificación → CRC → HARQ → descompresión → archivo recuperado
+```
+
+Con el mismo canal compara tres caminos: el **LDPC de 5G** (TS 38.212), el **código de bloque** de la barra lateral y **sin
+código**. Se eligen el escenario (5G eMBB, 5G URLLC o 6G candidato), la relación señal a ruido y los envíos máximos (ARQ), y
+se pulsa **Simular**. Muestra la velocidad, la latencia, la BLER, la información mutua original ↔ recuperado,
+la constelación recibida, la comparación con los requisitos de la UIT y, con **Calcular curvas**, la BLER frente a la SNR de
+cada código con su límite de Shannon.
+
+**Qué decir.**
+- "Esto ya no es una fórmula: cada bit del archivo pasa por la cadena de la norma y se cuenta lo que llega."
+- "El LDPC de 5G es un código de bloque lineal como los de la pestaña 6, pero con miles de bits y una matriz H dispersa. Se
+  decodifica con información blanda (LLR) y queda a 1–2 dB del límite de Shannon."
+- "HARQ junta lo que llegó en cada envío; por eso un bloque que falla la primera vez casi siempre pasa la segunda."
+- "La modulación y la tasa se ajustan solas: con cada bloque que falla se usa una más robusta y con cada acierto se sube un
+  poco, hasta fallar alrededor del 10 % de las veces."
+- "Después de decidir cada bit, este canal se comporta como el canal binario simétrico de la pestaña 5: la columna 'p del canal'
+  es su p."
+
+**Ejemplo.** `don_quijote.txt` (773 KB comprimido):
+
+| Escenario | LDPC de 5G | Hamming (7,4) | Sin código |
+|---|---|---|---|
+| 5G eMBB, 20 dB (256QAM, p = 6.6 %) | 285 Mbit/s, latencia media 0.78 ms, idéntico | no llega | no llega |
+| 5G eMBB, 8 dB (16QAM, p = 9.8 %) | 116 Mbit/s, idéntico | no llega | no llega |
+| 5G URLLC, 10 dB (16QAM) | 125 Mbit/s, 0.25 ms, idéntico | pierde el 51 % de los bloques | no llega |
+| 6G candidato, 30 dB (1024QAM, p = 1.7 %) | 1.75 Gbit/s, 0.1 ms, idéntico | 394 Mbit/s con varios envíos, idéntico | no llega |
+
+En las curvas con QPSK y la misma tasa 4/7, el LDPC llega a BLER = 10 % cerca de 2 dB y el Hamming (7,4) cerca de 9 dB: unos
+**7 dB de ganancia de codificación**. En URLLC a 10 dB, 300 000 paquetes de 32 bytes llegaron sin ninguna falla dentro de 1 ms:
+eso asegura (al 95 %) la confiabilidad de 99.999 % que pide IMT-2020.
+
 ### Consola
 
 Muestra la salida del núcleo C++ y el tiempo de cada etapa. Sirve para demostrar que el cálculo lo hace el programa.
@@ -242,7 +281,7 @@ Para 6G se usa el valor medio de su rango.
 - **El mismo contenido comprimido y sin comprimir**: la captura de pantalla en PNG (en `data/`) no baja nada porque el formato PNG
   ya está comprimido; la misma captura en BMP baja a la mitad. Lo mismo pasa con MP3, JPG y ZIP.
 
-## 6. Orden sugerido para la demostración (unos 14 minutos)
+## 6. Orden sugerido para la demostración (unos 17 minutos)
 
 1. **Introducción** (1 min): la frase de la sección 1 y el recorrido Fuente → … → Reconstrucción.
 2. **Fuente** con `ejemplo_varianza_huffman.txt` (2 min): H = 2.12 frente a 8 bits.
@@ -254,9 +293,11 @@ Para 6G se usa el valor medio de su rango.
 7. **Contraste** entre `mapa_interseccion.bmp` (99 %) y `foto_con_ruido.bmp` (3 %) (1 min).
 8. **Agente IA** con `sensores_trafico.csv` (2 min): decisión, gráfica por bloques, mapa de las 27 combinaciones.
 9. **5G / 6G** con la captura en BMP (1 min): la red 5G real pasa de 41 ms a 22.5 ms.
-10. **Cierre** (30 s): entropía = límite de la compresión, varianza = criterio entre códigos igual de eficientes, información
+10. **Simulación 5G/6G** con `don_quijote.txt` (3 min): eMBB a 20 dB (LDPC idéntico, Hamming no llega), la constelación, las
+    curvas BLER y el escenario 6G a 30 dB.
+11. **Cierre** (30 s): entropía = límite de la compresión, varianza = criterio entre códigos igual de eficientes, información
     mutua = lo que sobrevive al canal, control de error = redundancia que se agrega a propósito, agente = decide solo, 5G/6G =
-    menos bits, menos tiempo.
+    menos bits, menos tiempo, y un buen código de canal llega cerca del límite de Shannon.
 
 ## 7. Preguntas frecuentes
 
@@ -276,6 +317,10 @@ Para 6G se usa el valor medio de su rango.
 | ¿Por qué no basta con dar n y k? | Hay muchas matrices P para el mismo (n, k) y no todas corrigen lo mismo. El programa busca la de mayor distancia mínima y dice si es la mayor posible, por las cotas de Singleton, Hamming y Griesmer o porque revisó todas las matrices con más distancia. |
 | ¿Qué códigos usa 5G? | LDPC para los datos y Polar para la señalización (3GPP TS 38.212), con bloques de miles de bits. Para mensajes de control de 3 a 11 bits usa un código de bloque (32, K) que se calcula con c = m·G. |
 | ¿Y 6G? | En junio de 2026 3GPP acordó soportar un nuevo grafo base de LDPC (BG3); el resto de la codificación sigue en estudio. |
+| ¿La simulación usa el LDPC de verdad? | Sí: los grafos base salen de la norma (TS 38.212) y el codificador, la adaptación de tasa, los CRC y la modulación dan los mismos bits que una implementación independiente (py3gpp). |
+| ¿Por qué el Hamming (7,4) no llega si corrige errores? | Corrige 1 error de cada 7 bits con decisiones duras. Con 256QAM a 20 dB el canal deja 6.6 % de bits errados, muchos más de los que puede corregir. El LDPC usa información blanda y bloques de miles de bits. |
+| ¿Qué es la información mutua del demodulador? | Cuánta información sobre cada bit deja pasar el canal junto con la modulación. Si la tasa del código por símbolo es menor, el decodificador puede corregir; si es mayor, hacen falta retransmisiones. |
+| ¿Por qué 100 000 paquetes no bastan para 99.999 %? | Con 0 fallas en N paquetes sólo se puede asegurar (al 95 %) una probabilidad de falla menor que 3/N; para 10⁻⁵ hacen falta 300 000. |
 
 ## 8. Supuestos y límites
 
@@ -289,3 +334,7 @@ Para 6G se usa el valor medio de su rango.
   protocolos de red.
 - Los valores de **6G** son objetivos de investigación de la UIT, no una norma técnica terminada.
 - Los tiempos incluyen la demora fija de la red (4 ms en 5G; 0.1 a 1 ms en 6G).
+- En la **simulación 5G/6G** el canal sólo suma ruido gaussiano (AWGN), hay una sola antena, el receptor no tiene que estimar el
+  canal, no hay cabeceras de protocolo y un bloque se repite 4 envíos después. La latencia cuenta el tiempo de los envíos y las
+  esperas entre repeticiones.
+- El **escenario 6G** usa valores candidatos (400 MHz, envíos de 62.5 µs, hasta 1024QAM) con el LDPC de 5G: no hay norma de 6G.

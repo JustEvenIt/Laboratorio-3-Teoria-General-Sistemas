@@ -91,6 +91,41 @@ técnica de 3GPP, por eso se compara con los valores de IMT-2030.
 El cálculo del TBS y de la segmentación se verificó contra una segunda implementación independiente con aritmética exacta
 (16 848 casos, 0 diferencias); la tasa pico de n78 con 4 capas y 256QAM da 2.34 Gbit/s, el valor publicado.
 
+## Simulación 5G / 6G bit por bit
+
+La pestaña **10 · Simulación 5G/6G** transmite el archivo comprimido por una capa física como la de 5G NR, bit por bit, y
+compara tres caminos con el mismo canal: el **LDPC de 5G**, el **código de bloque** del control de error y **sin código**.
+
+```
+archivo comprimido → bloques de transporte → CRC24A/CRC16 + segmentación + CRC24B → código de canal
+→ adaptación de tasa (rv 0, 2, 3, 1) + entrelazado → QPSK…1024QAM → canal con ruido gaussiano (AWGN) → LLR
+→ decodificación → CRC → HARQ (hasta 4 envíos) → descompresión → archivo recuperado
+```
+
+| Parte | Referencia | Archivo |
+|---|---|---|
+| CRC24A, CRC24B, CRC16, segmentación en bloques de código | TS 38.212 §5.1, §5.2.2, §7.2 | `src/NR.cpp` |
+| LDPC con grafos base BG1 (46 × 68) y BG2 (42 × 52), tamaños de elevación Zc | TS 38.212 §5.3.2, Tablas 5.3.2-1 a -3 | `include/GrafosBaseNR.h`, `src/NR.cpp` |
+| Adaptación de tasa: buffer circular, versiones de redundancia y entrelazado de bits | TS 38.212 §5.4.2 | `src/NR.cpp` |
+| Modulación QPSK, 16QAM, 64QAM, 256QAM y 1024QAM | TS 38.211 §5.1 | `src/NR.cpp` |
+| Tablas MCS 1 a 4 (incluida la de baja eficiencia para URLLC y la de 1024QAM) y TBS | TS 38.214 §5.1.3 | `src/NR.cpp`, `src/Enlace.cpp` |
+| Decodificador LDPC min-sum normalizado (fila por fila), HARQ con redundancia incremental, ajuste automático de modulación y tasa | — | `src/NR.cpp`, `src/Simulacion.cpp` |
+
+Escenarios, todos con una sola antena y canal AWGN: **5G eMBB** (banda n78, 100 MHz, envíos de 0.5 ms, hasta 256QAM), **5G
+URLLC** (n78, envíos de 0.25 ms, modulación y tasa más robustas) y **6G candidato** (400 MHz, envíos de 62.5 µs, hasta
+1024QAM). La modulación y la tasa del código se eligen solas según la SNR y se ajustan con cada bloque que falla o llega bien. Los resultados se comparan con los requisitos de IMT-2020 (ITU-R M.2410) y de IMT-2030 (ITU-R M.2160); la
+prueba de confiabilidad envía paquetes de 32 bytes dentro del plazo y da la cota de Clopper-Pearson al 95 %. También calcula
+las curvas BLER frente a SNR de los cuatro códigos con su límite de Shannon.
+
+Verificación:
+- Los grafos base se extrajeron del PDF de TS 38.212 y coinciden entrada por entrada con una copia independiente (316 y 197
+  entradas).
+- El codificador LDPC, la adaptación de tasa, los CRC y la modulación hasta 256QAM coinciden bit a bit con la biblioteca
+  `py3gpp`. En BG2 con K ≤ 640 py3gpp da palabras que no cumplen la H de la norma; las de este programa sí la cumplen.
+- La fórmula de 1024QAM y las tablas MCS se leyeron de TS 38.211 V17.6.0 y TS 38.214 V17.8.0.
+- El decodificador queda a 1–2.5 dB del límite de Shannon (por ejemplo, QPSK con tasa 1/2 y K = 8448 decodifica desde
+  Es/N0 ≈ 1.1 dB, con el límite en 0 dB).
+
 ## Compilación y Ejecución
 
 ```bash
@@ -120,6 +155,9 @@ Uso desde la terminal:
 ./codificador_6g.exe data/archivo.mp3 --barrido 8,16,32,64,128,256,512,1024,2048 --json barrido.json
 ./codificador_6g.exe data/archivo.mp3 --agente --salida data/salida/agente --json agente.json
 ./codificador_6g.exe data/archivo.mp3 --enlace --comprimido data/salida/agente/agente.ti6g --snr 20 --capas 4 --servicio embb --json enlace.json
+./codificador_6g.exe data/archivo.txt --simular --comprimido data/salida/prueba/comprimido.ti6g --escenario embb --canal awgn --snr 20 --fec 7,4 --json sim.json
+./codificador_6g.exe data/archivo.txt --simular --comprimido data/salida/prueba/comprimido.ti6g --escenario urllc --snr 10 --paquetes 300000 --json sim.json
+./codificador_6g.exe --curvas --escenario embb --snr 3 --fec 7,4 --json curvas.json
 ```
 
 `data/ejemplo_varianza_huffman.txt` reproduce el ejemplo clásico $P = \{0.4, 0.2, 0.2, 0.1, 0.1\}$. Las dos variantes de Huffman tienen el mismo $\bar L = 2.2$, pero $\sigma^2 = 0.16$ frente a $1.36$.

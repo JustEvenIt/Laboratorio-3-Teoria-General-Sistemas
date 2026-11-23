@@ -15,6 +15,7 @@
 #include "../include/Enlace.h"
 #include "../include/Json.h"
 #include "../include/ProcesadorFuente.h"
+#include "../include/Simulacion.h"
 #include "../include/Sistema.h"
 
 using namespace std;
@@ -39,6 +40,9 @@ struct Opciones {
     bool enlace = false;           // modo enlace 5G NR / requisitos 5G y 6G
     string comprimido;             // archivo .ti6g que se transmite
     ParametrosEnlace en;
+    bool simular = false;          // modo simulación 5G/6G del archivo comprimido
+    bool curvas = false;           // modo curvas BLER frente a SNR
+    OpcionesSimulacion sim;
 };
 
 static void uso() {
@@ -51,6 +55,11 @@ static void uso() {
             "                    [--eps-cambio 0.6] [--eps-min 0.02] [--ph 0.02,1] [--sin-detector] [--salida DIR] [--json RUTA]\n"
             "     codificador_6g <archivo> --enlace --comprimido ARCHIVO.ti6g [--snr 20] [--capas 4]\n"
             "                    [--servicio embb|urllc] [--tabla-mcs 256|64] [--json RUTA]\n"
+            "     codificador_6g <archivo> --simular --comprimido ARCHIVO.ti6g [--escenario embb|urllc|6g] [--snr 20]\n"
+            "                    [--fec 7,4|ninguno] [--harq 4] [--iteraciones 25] [--max-bytes 0] [--paquetes -1]\n"
+            "                    [--semilla 42] [--salida DIR] [--json RUTA]\n"
+            "     codificador_6g --curvas [--escenario embb] [--snr 20] [--fec 7,4]\n"
+            "                    [--snr-desde A --snr-hasta B --snr-paso 1] [--bloques-curva 100] [--json RUTA]\n"
             "N debe ser multiplo de 8, entre 8 y 32768.\n";
 }
 
@@ -212,8 +221,19 @@ int main(int argc, char* argv[]) {
             }
             else if (a == "--enlace") op.enlace = true;
             else if (a == "--comprimido") op.comprimido = valor();
-            else if (a == "--snr") op.en.snrDb = stod(valor());
+            else if (a == "--snr") op.en.snrDb = op.sim.snrDb = stod(valor());
             else if (a == "--capas") op.en.capas = stoi(valor());
+            else if (a == "--simular") op.simular = true;
+            else if (a == "--curvas") op.curvas = true;
+            else if (a == "--escenario") op.sim.escenario = valor();
+            else if (a == "--harq") op.sim.harqMax = stoi(valor());
+            else if (a == "--iteraciones") op.sim.iteraciones = stoi(valor());
+            else if (a == "--max-bytes") op.sim.maxBytes = stoull(valor());
+            else if (a == "--paquetes") op.sim.paquetes = stoi(valor());
+            else if (a == "--snr-desde") op.sim.snrDesde = stod(valor());
+            else if (a == "--snr-hasta") op.sim.snrHasta = stod(valor());
+            else if (a == "--snr-paso") op.sim.snrPaso = stod(valor());
+            else if (a == "--bloques-curva") op.sim.bloquesCurva = stoi(valor());
             else if (a == "--servicio") op.en.servicio = valor();
             else if (a == "--tabla-mcs") op.en.tablaMCS = stoi(valor());
             else if (a == "--barrido") {
@@ -227,6 +247,20 @@ int main(int argc, char* argv[]) {
             cerr << "Valor invalido para " << a << "\n";
             return 2;
         }
+    }
+    if (op.simular || op.curvas) {
+        const bool valido = (op.sim.escenario == "embb" || op.sim.escenario == "urllc" || op.sim.escenario == "6g") &&
+                            op.sim.snrDb >= -20 && op.sim.snrDb <= 60 && op.sim.harqMax >= 1 && op.sim.harqMax <= 8 &&
+                            op.sim.iteraciones >= 1 && op.sim.iteraciones <= 100 && op.sim.bloquesCurva >= 1 &&
+                            op.sim.bloquesCurva <= 100000;
+        if (!valido) { uso(); return 2; }
+        op.sim.fec = op.fec;
+        op.sim.semilla = op.semilla;
+        op.sim.salida = op.salida;
+        if (op.curvas) return ejecutarCurvas(op.sim, op.json.empty() ? (fs::path(op.salida) / "curvas.json").string() : op.json);
+        if (posicionales.empty() || op.comprimido.empty()) { uso(); return 2; }
+        return ejecutarSimulacion(posicionales[0], op.comprimido, op.sim,
+                                  op.json.empty() ? (fs::path(op.salida) / "simulacion.json").string() : op.json);
     }
     if (posicionales.empty()) { uso(); return 2; }
     op.ruta = posicionales[0];

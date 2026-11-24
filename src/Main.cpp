@@ -42,6 +42,7 @@ struct Opciones {
     ParametrosEnlace en;
     bool simular = false;          // modo simulación 5G/6G del archivo comprimido
     bool curvas = false;           // modo curvas BLER frente a SNR
+    bool confiabilidad = false;    // modo prueba de confiabilidad con mensajes de 32 bytes
     OpcionesSimulacion sim;
 };
 
@@ -56,9 +57,11 @@ static void uso() {
             "     codificador_6g <archivo> --enlace --comprimido ARCHIVO.ti6g [--snr 20] [--capas 4]\n"
             "                    [--servicio embb|urllc] [--tabla-mcs 256|64] [--json RUTA]\n"
             "     codificador_6g <archivo> --simular --comprimido ARCHIVO.ti6g [--escenario embb|urllc|6g] [--snr 20]\n"
-            "                    [--fec 7,4|ninguno] [--harq 4] [--iteraciones 25] [--max-bytes 0] [--paquetes -1]\n"
-            "                    [--semilla 42] [--salida DIR] [--json RUTA]\n"
+            "                    [--capas auto|1|2|4|8] [--fec 7,4|ninguno] [--harq 4] [--iteraciones 25] [--max-bytes 0]\n"
+            "                    [--sin-cifrado] [--clave 32 cifras hex] [--paquetes -1] [--bloques-traza 40]\n"
+            "                    [--progreso RUTA] [--semilla 42] [--salida DIR] [--json RUTA]\n"
             "     codificador_6g --curvas [--escenario embb] [--snr 20] [--fec 7,4]\n"
+            "     codificador_6g --confiabilidad [--escenario urllc] [--snr 10] [--paquetes 300000] [--json RUTA]\n"
             "                    [--snr-desde A --snr-hasta B --snr-paso 1] [--bloques-curva 100] [--json RUTA]\n"
             "N debe ser multiplo de 8, entre 8 y 32768.\n";
 }
@@ -222,9 +225,18 @@ int main(int argc, char* argv[]) {
             else if (a == "--enlace") op.enlace = true;
             else if (a == "--comprimido") op.comprimido = valor();
             else if (a == "--snr") op.en.snrDb = op.sim.snrDb = stod(valor());
-            else if (a == "--capas") op.en.capas = stoi(valor());
+            else if (a == "--capas") {  // en --simular, "auto" deja que el agente elija
+                const string v = valor();
+                op.sim.capas = v == "auto" ? 0 : stoi(v);
+                if (v != "auto") op.en.capas = op.sim.capas;
+            }
+            else if (a == "--sin-cifrado") op.sim.cifrar = false;
+            else if (a == "--clave") op.sim.clave = valor();
+            else if (a == "--bloques-traza") op.sim.bloquesTraza = stoi(valor());
+            else if (a == "--progreso") op.sim.progreso = valor();
             else if (a == "--simular") op.simular = true;
             else if (a == "--curvas") op.curvas = true;
+            else if (a == "--confiabilidad") op.confiabilidad = true;
             else if (a == "--escenario") op.sim.escenario = valor();
             else if (a == "--harq") op.sim.harqMax = stoi(valor());
             else if (a == "--iteraciones") op.sim.iteraciones = stoi(valor());
@@ -248,16 +260,20 @@ int main(int argc, char* argv[]) {
             return 2;
         }
     }
-    if (op.simular || op.curvas) {
+    if (op.simular || op.curvas || op.confiabilidad) {
         const bool valido = (op.sim.escenario == "embb" || op.sim.escenario == "urllc" || op.sim.escenario == "6g") &&
                             op.sim.snrDb >= -20 && op.sim.snrDb <= 60 && op.sim.harqMax >= 1 && op.sim.harqMax <= 8 &&
                             op.sim.iteraciones >= 1 && op.sim.iteraciones <= 100 && op.sim.bloquesCurva >= 1 &&
-                            op.sim.bloquesCurva <= 100000;
+                            op.sim.bloquesCurva <= 100000 && op.sim.bloquesTraza >= 0 && op.sim.bloquesTraza <= 1000 &&
+                            (op.sim.capas == 0 || op.sim.capas == 1 || op.sim.capas == 2 || op.sim.capas == 4 ||
+                             op.sim.capas == 8);
         if (!valido) { uso(); return 2; }
         op.sim.fec = op.fec;
         op.sim.semilla = op.semilla;
         op.sim.salida = op.salida;
         if (op.curvas) return ejecutarCurvas(op.sim, op.json.empty() ? (fs::path(op.salida) / "curvas.json").string() : op.json);
+        if (op.confiabilidad)
+            return ejecutarConfiabilidad(op.sim, op.json.empty() ? (fs::path(op.salida) / "confiabilidad.json").string() : op.json);
         if (posicionales.empty() || op.comprimido.empty()) { uso(); return 2; }
         return ejecutarSimulacion(posicionales[0], op.comprimido, op.sim,
                                   op.json.empty() ? (fs::path(op.salida) / "simulacion.json").string() : op.json);
@@ -334,12 +350,37 @@ int main(int argc, char* argv[]) {
          << "[Fuente] H=" << mf.entropia << " bits/simbolo (max " << mf.entropiaMaxima << "), KL(P||U)=" << mf.klUniformeN << "\n";
 
     // ===== ETAPA 2: CODIFICACIÓN (uniforme / no uniforme / adaptable) =====
+    // Cada flujo se mide apenas se codifica y se libera si ya no puede ser el elegido: con archivos grandes cada uno
+    // ocupa cientos de MB y tenerlos todos a la vez podía agotar la memoria
+    int fijo = op.metodo == "uniforme" ? METODO_UNIFORME : op.metodo == "huffman" ? METODO_HUFFMAN
+             : op.metodo == "lzw" ? METODO_LZW : -1;
+    Codificado* codigos[3];
+    uint64_t totales[3], bytesCarga[3];
+    int mejorHasta = -1;
+    auto medir = [&](int k) {
+        bytesCarga[k] = codigos[k]->carga.size();
+        totales[k] = compresor.tamanoCabecera(*codigos[k], f) + bytesCarga[k];
+        if (fijo >= 0) {
+            if (k != fijo) vector<uint8_t>().swap(codigos[k]->carga);
+        } else if (mejorHasta < 0 || totales[k] < totales[mejorHasta]) {
+            if (mejorHasta >= 0) vector<uint8_t>().swap(codigos[mejorHasta]->carga);
+            mejorHasta = k;
+        } else {
+            vector<uint8_t>().swap(codigos[k]->carga);
+        }
+    };
     t = chrono::steady_clock::now();
     Codificado cu = compresor.codificarUniforme(f);
+    codigos[0] = &cu;
+    medir(0);
     Codificado ch = compresor.codificarHuffman(f);
+    codigos[1] = &ch;
+    medir(1);
     double tCodificacion = ms(t);
     t = chrono::steady_clock::now();
     Codificado cl = compresor.codificarLZW(f, op.entradasDiccionario, op.pasosTraza);
+    codigos[2] = &cl;
+    medir(2);
     double tLZW = ms(t);
 
     vector<uint8_t> Luniforme(M, (uint8_t)cu.anchoUniforme);
@@ -350,12 +391,6 @@ int main(int argc, char* argv[]) {
     double lzwMedia = (double)cl.bitsCarga / n;
     vector<uint64_t> codigosHuffman = Compresor::codigosCanonicos(ch.longitudes);
 
-    Codificado* codigos[3] = {&cu, &ch, &cl};
-    uint64_t totales[3], bytesCarga[3];
-    for (int k = 0; k < 3; ++k) {
-        bytesCarga[k] = codigos[k]->carga.size();
-        totales[k] = compresor.tamanoCabecera(*codigos[k], f) + bytesCarga[k];
-    }
 
     int elegido;
     if (op.metodo == "uniforme") elegido = METODO_UNIFORME;
@@ -363,8 +398,6 @@ int main(int argc, char* argv[]) {
     else if (op.metodo == "lzw") elegido = METODO_LZW;
     else elegido = (int)(min_element(totales, totales + 3) - totales);  // adaptable: el más pequeño
     Codificado& c = *codigos[elegido];
-    for (int k = 0; k < 3; ++k)
-        if (k != elegido) vector<uint8_t>().swap(codigos[k]->carga);  // ya se midieron; liberar memoria
     string flujoEnviado = bitsFlujo(c.carga, c.bitsCarga, 256);
     cout << "[Codificacion] Uniforme L=" << mu.longitudMedia << " | Huffman L=" << mh.longitudMedia
          << " sigma^2=" << mh.varianza << " | LZW " << lzwMedia << " bits/simbolo\n"
@@ -397,17 +430,23 @@ int main(int argc, char* argv[]) {
     cout << "[Reconstruccion] " << (exacto ? "Identica al original (sin perdida)" : "DIFERENTE al original") << "\n";
 
     // ===== ETAPA 5: CANAL BSC Y INFORMACIÓN MUTUA =====
-    // Archivo que obtiene el receptor a partir de los índices decodificados (⊥ se escribe como ceros)
-    auto escribirRecibido = [&](const string& ruta, const vector<uint32_t>& ids) {
+    // Lo que obtiene el receptor con un flujo comprimido recibido: se decodifica símbolo por símbolo, se escribe el
+    // archivo (⊥ se escribe como ceros) y se acumula I(X;Y) entre la fuente y lo recibido, sin guardar la secuencia
+    auto recibirYMedir = [&](const uint8_t* carga, const string& ruta, vector<uint32_t>* muestra) {
+        AcumuladorMutua acumulador(f.frecuencias, mf.entropia);
         ofstream o(ruta, ios::binary);
-        vector<unsigned char> bloque(f.bytesPorSimbolo, 0);
-        uint64_t escritos = 0;
-        for (uint32_t id : ids) {
-            const unsigned char* p = id < M ? f.simbolo(id) : bloque.data();
+        vector<unsigned char> borrado(f.bytesPorSimbolo, 0);
+        uint64_t i = 0, escritos = 0;
+        compresor.decodificarCon(c, carga, c.bitsCarga, n, M, [&](uint32_t id) {
+            acumulador.agregar(f.ids[i], id);
+            const unsigned char* p = id < M ? f.simbolo(id) : borrado.data();
             uint64_t b = min<uint64_t>(f.bytesPorSimbolo, f.tamanoOriginal - escritos);
             o.write((const char*)p, b);
             escritos += b;
-        }
+            if (muestra && muestra->size() < op.muestra) muestra->push_back(id);
+            ++i;
+        });
+        return acumulador.resultado();
     };
     t = chrono::steady_clock::now();
     vector<uint8_t> cargaOriginal;  // flujo comprimido tal como sale del transmisor, para el control de error
@@ -417,9 +456,7 @@ int main(int argc, char* argv[]) {
     MetricasMutua mm;
     vector<uint32_t> idsCanal;
     if (rc.errores01 + rc.errores10 > 0) {
-        idsCanal = compresor.decodificar(c, n, M);
-        mm = Sistema::informacionMutua(f.ids, idsCanal, f.frecuencias, mf.entropia);
-        escribirRecibido(rutaCanal, idsCanal);
+        mm = recibirYMedir(c.carga.data(), rutaCanal, &idsCanal);  // idsCanal guarda sólo los primeros símbolos
     } else {
         mm.HX = mm.HY = mm.HXY = mm.IXY = mf.entropia;
     }
@@ -444,12 +481,8 @@ int main(int argc, char* argv[]) {
                 x.mm.HX = x.mm.HY = x.mm.HXY = x.mm.IXY = mf.entropia;
                 return;
             }
-            c.carga.swap(recuperada);  // el decodificador lee c.carga
-            vector<uint32_t> ids = compresor.decodificar(c, n, M);
-            c.carga.swap(recuperada);
-            x.mm = Sistema::informacionMutua(f.ids, ids, f.frecuencias, mf.entropia);
             x.archivo = (fs::path(op.salida) / ("reconstruido_" + sufijo + ext)).string();
-            escribirRecibido(x.archivo, ids);
+            x.mm = recibirYMedir(recuperada.data(), x.archivo, nullptr);
         };
         vector<uint8_t> recuperada;
         t = chrono::steady_clock::now();

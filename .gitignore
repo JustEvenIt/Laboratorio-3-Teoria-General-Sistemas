@@ -12,3 +12,10 @@ desktop.inis
 venv/
 # Salidas generadas por el sistema
 data/salida/
+
+# Archivos de prueba de más de 100 MB (GitHub no acepta archivos de ese tamaño); el README dice de dónde salen
+data/wikipedia_enwik9_550MB.txt
+data/chopin_baladas_fantasia_allegro.wav
+data/nasa_blue_marble_21600x10800.bmp
+data/tears_of_steel_1080p.webm
+__pycache__/

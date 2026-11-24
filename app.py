@@ -1,12 +1,14 @@
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 RAIZ = Path(__file__).resolve().parent
 EJECUTABLE = RAIZ / "codificador_6g.exe"
@@ -44,10 +46,11 @@ def compilar_si_hace_falta():
         return True
     if shutil.which("g++") is None:
         st.error("No se encontró `g++` para compilar el núcleo C++. Instálalo (MinGW en Windows) o compila manualmente:\n\n"
-                 "`g++ -O2 -std=c++17 src/*.cpp -o codificador_6g.exe`")
+                 "`g++ -O3 -std=c++17 -pthread src/*.cpp -o codificador_6g.exe`")
         return False
     with st.spinner("Compilando el núcleo C++..."):
-        cmd = ["g++", "-O2", "-std=c++17", *[str(f) for f in sorted((RAIZ / "src").glob("*.cpp"))], "-o", str(EJECUTABLE)]
+        cmd = ["g++", "-O3", "-std=c++17", "-pthread", *[str(f) for f in sorted((RAIZ / "src").glob("*.cpp"))], "-o",
+               str(EJECUTABLE)]
         r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         st.error("Error al compilar el núcleo C++")
@@ -602,71 +605,166 @@ def velocidad(b):
     return f"{b / 1e9:,.2f} Gbit/s" if b >= 1e9 else f"{b / 1e6:,.1f} Mbit/s"
 
 
-def seccion_simulacion(res, d):
-    st.subheader("Simulación del envío por 5G y 6G")
-    st.markdown("El archivo comprimido se envía **bit por bit** como lo haría una red 5G: se parte en bloques, a cada bloque se "
-                "le agrega un **CRC** para detectar errores y un **código de control de error**, los bits se convierten en "
-                "**símbolos** (modulación), el canal les suma **ruido**, el receptor corrige lo que puede y pide repetir lo que "
-                "llegó mal (**ARQ**). Al final se descomprime y se compara con el original.")
-    st.markdown("Con el mismo ruido se comparan tres formas de proteger los bits: el **LDPC**, el código que usa 5G; el **código "
-                "de bloque** de la barra lateral (por ejemplo Hamming (7,4)); y **sin código** (sólo CRC).")
+def meta_confiabilidad(minimo, maximo):
+    return f"≥ {minimo:.5%}" if minimo == maximo else f"{minimo:.5%} a {maximo:.7%}"
 
-    ag = st.session_state.get("agente")
-    if ag and ag["archivo"] == res["archivo"]:
-        ruta_comp, como = Path(ag["datos"]["decision"]["archivo_comprimido"]), f"agente de IA: {ag['datos']['decision']['nombre']}"
+
+def fila_confiabilidad(c):
+    exito, garantia, N = c["exito"], c["confiabilidad_garantizada"], c["paquetes"]
+    if garantia >= c["requisito_min"]:
+        veredicto = "Sí" if c["requisito_min"] == c["requisito_max"] else "Sí, el mínimo"
+    elif exito < c["requisito_min"]:
+        veredicto = "No"
     else:
-        ruta_comp, como = Path(d["compresion"]["archivo"]), f"{d['codificacion']['metodo_elegido']}, N = {d['fuente']['n_bits']}"
-    bytes_comp = ruta_comp.stat().st_size if ruta_comp.exists() else 0
+        veredicto = f"No se puede afirmar con {N:,} mensajes (hacen falta {c['paquetes_necesarios']:,.0f})"
+    return (f"Confiabilidad: 32 bytes en ≤ {c['plazo_s'] * 1e3:g} ms", meta_confiabilidad(c["requisito_min"], c["requisito_max"]),
+            f"{c['fallas']:,} fallas en {N:,}; se puede asegurar {garantia:.5%}", veredicto)
 
-    c1, c2, c3 = st.columns(3)
-    escenario = c1.selectbox("Escenario", list(ESCENARIOS_SIM), format_func=lambda k: ESCENARIOS_SIM[k][0], key="sim_esc")
-    snr = c2.number_input("Relación señal a ruido, SNR (dB)", min_value=-10.0, max_value=50.0, value=ESCENARIOS_SIM[escenario][1],
-                          step=1.0, key=f"sim_snr_{escenario}",
-                          help="Cuánto más fuerte es la señal que el ruido. Con más SNR el canal se equivoca menos y se pueden "
-                               "mandar más bits por símbolo.")
-    harq = c3.number_input("Envíos máximos por bloque (ARQ)", min_value=1, max_value=8, value=4, key="sim_harq",
-                           help="Si un bloque llega mal (el CRC no cuadra), se pide otra vez, hasta este número de envíos.")
-    c4, c5 = st.columns(2)
-    probar = c4.checkbox("Probar la confiabilidad con 300 000 mensajes de 32 bytes (unos 40 s)", value=False,
-                         key="sim_conf", disabled=escenario == "embb",
-                         help="5G URLLC y 6G exigen que un mensaje corto llegue bien en menos de 1 ms el 99.999 % de las veces. "
-                              "Con 300 000 mensajes sin fallas ya se puede afirmar.")
-    completo = c5.checkbox("Archivo completo", value=bytes_comp <= LIMITE_SIM, key="sim_completo",
-                           help="Con archivos grandes la simulación tarda; sin esta opción se envían los primeros 4 MB.")
-    st.caption(f"Se envía el archivo comprimido: **{tam(bytes_comp)}** ({como}). Código de bloque: el de la barra lateral "
-               f"({especificacion_fec}).")
 
-    if st.button("Simular", type="primary", key="sim_boton"):
-        salida = SALIDA / f"simulacion_{Path(res['archivo']).stem}"
-        salida.mkdir(parents=True, exist_ok=True)
-        ruta_json = salida / "simulacion.json"
-        args = [str(DATA / res["archivo"]), "--simular", "--comprimido", str(ruta_comp), "--escenario", escenario,
-                "--snr", repr(float(snr)), "--harq", str(int(harq)), "--fec", especificacion_fec,
-                "--paquetes", str(300000 if probar and escenario != "embb" else 0),
-                "--salida", str(salida), "--json", str(ruta_json)]
-        if not completo:
-            args += ["--max-bytes", str(LIMITE_SIM)]
-        with st.spinner("Enviando el archivo bit por bit..."):
-            rc, out, err = ejecutar(args)
+def seccion_confiabilidad(escenario, snr, harq):
+    st.markdown("**Prueba de confiabilidad**")
+    st.caption("Envía 300 000 mensajes cortos de 32 bytes, cada uno con su CRC y el LDPC, con la modulación y la tasa más "
+               "robustas que permite la SNR, y cuenta cuántos llegan bien en menos de 1 ms (con las repeticiones que quepan en "
+               "ese tiempo). 5G exige 99.999 % y 6G, de 99.999 % a 99.99999 %. No depende del archivo; tarda entre 15 y 40 s.")
+    if st.button("Probar confiabilidad con 300 000 mensajes", key="conf_boton"):
+        ruta_json = SALIDA / "confiabilidad.json"
+        SALIDA.mkdir(parents=True, exist_ok=True)
+        with st.spinner("Enviando 300 000 mensajes de 32 bytes..."):
+            rc, out, err = ejecutar(["--confiabilidad", "--escenario", escenario, "--snr", repr(snr), "--harq", str(harq),
+                                     "--paquetes", "300000", "--json", str(ruta_json)])
         if rc != 0 or not ruta_json.exists():
-            st.error("La simulación terminó con error")
+            st.error("La prueba terminó con error")
             st.code(err or out)
             return
-        st.session_state["simulacion"] = {"archivo": res["archivo"], "datos": json.loads(ruta_json.read_text(encoding="utf-8"))}
-        st.session_state.pop("curvas_sim", None)
-
-    sim = st.session_state.get("simulacion")
-    if not sim or sim["archivo"] != res["archivo"]:
-        st.info("Elige el escenario y pulsa **Simular**.")
+        st.session_state["confiabilidad_sim"] = {"clave": (escenario, snr, harq),
+                                                 "datos": json.loads(ruta_json.read_text(encoding="utf-8"))}
+    cs = st.session_state.get("confiabilidad_sim")
+    if not cs or cs["clave"] != (escenario, snr, harq):
         return
-    s = sim["datos"]
-    e, m, k, conf = s["escenario"], s["mcs"], s["canal"], s["confiabilidad"]
-    caminos = s["caminos"]
-    L = next(c for c in caminos if c["clave"] == "ldpc")
+    c = cs["datos"]["confiabilidad"]
+    f1, f2, f3, f4 = st.columns(4)
+    f1.metric("Mensajes enviados", f"{c['paquetes']:,}")
+    f2.metric("Mensajes que fallaron", f"{c['fallas']:,}", help=f"Llegaron mal o no llegaron dentro de {c['plazo_s'] * 1e3:g} ms")
+    f3.metric("Llegaron bien", f"{c['exito']:.5%}")
+    f4.metric("Se puede asegurar (95 %)", f"{c['confiabilidad_garantizada']:.5%}",
+              help="Con f fallas en N mensajes, la probabilidad real de falla es menor que esta cota con 95 % de confianza "
+                   "(con 0 fallas, unas 3 de cada N).")
+    requisito, meta, simulado, veredicto = fila_confiabilidad(c)
+    (st.success if veredicto.startswith("Sí") else st.warning)(
+        f"{cs['datos']['escenario']['generacion']}: meta {meta} → **{veredicto}**")
+    st.caption(f"Cada mensaje usa {MODULACION[c['qm']]} ({c['qm']} bits por símbolo) con tasa R = {c['tasa']:.3f}; en 1 ms caben "
+               f"{c['max_envios']} envío{'s' if c['max_envios'] != 1 else ''}. "
+               f"{c['en_plazo_min']:,} mensajes llegaron también en {c['plazo_min_s'] * 1e3:g} ms. "
+               "Para asegurar 99.99999 % harían falta 30 millones de mensajes sin fallas.")
 
-    st.success(f"**{e['nombre']}** · SNR {k['snr_db']:.1f} dB · cada envío dura {e['unidad_s'] * 1e3:.3f} ms · modulación "
-               f"inicial **{MODULACION[m['qm']]}** ({m['qm']} bits por símbolo) con tasa del código **R = {m['tasa']:.3f}**, "
-               "elegidas según la SNR")
+
+CAPAS_SIM = {"auto": "Que decida el agente", "1": "1 capa", "2": "2 capas", "4": "4 capas", "8": "8 capas"}
+HARQ_MAX_SIM = 8  # la simulación admite hasta 8 envíos por bloque
+VELOCIDAD_SIM = SALIDA / "velocidad_simulacion.json"  # rapidez medida en la última simulación, para estimar la próxima
+VISUAL = RAIZ / "visual" / "viaje.html"
+
+
+def leer_json(ruta):
+    try:
+        return json.loads(Path(ruta).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def duracion(seg):
+    seg = max(0, int(round(seg)))
+    if seg < 60:
+        return f"{seg} s"
+    if seg < 3600:
+        return f"{seg // 60} min {seg % 60:02d} s"
+    return f"{seg // 3600} h {seg % 3600 // 60:02d} min"
+
+
+def camino_de(s, clave):
+    return next((c for c in s["caminos"] if c["clave"] == clave), None)
+
+
+def lanzar_simulacion(args, ruta_json, ruta_prog, archivo, bits):
+    """La simulación corre aparte: la página sigue respondiendo y muestra el avance."""
+    for r in (ruta_json, ruta_prog):
+        Path(r).unlink(missing_ok=True)
+    ruta_log = Path(ruta_json).with_suffix(".log")
+    with open(ruta_log, "w", encoding="utf-8") as log:
+        proc = subprocess.Popen([str(EJECUTABLE), *args, "--progreso", str(ruta_prog)], stdout=log,
+                                stderr=subprocess.STDOUT, cwd=RAIZ)
+    st.session_state["sim_trabajo"] = {"proc": proc, "json": str(ruta_json), "prog": str(ruta_prog), "log": str(ruta_log),
+                                       "archivo": archivo, "inicio": time.time(), "bits": bits}
+
+
+@st.fragment(run_every=1.0)
+def progreso_simulacion():
+    t = st.session_state.get("sim_trabajo")
+    if not t:
+        return
+    rc = t["proc"].poll()
+    if rc is None:
+        p = leer_json(t["prog"]) or {"fase": "Preparando", "hecho": 0, "total": 1}
+        frac = min(1.0, p["hecho"] / p["total"]) if p["total"] else 0.0
+        ahora = time.time()
+        texto = f"{p['fase']} · {frac:.0%} · lleva {duracion(ahora - t['inicio'])}"
+        if p["fase"].startswith("Transmitiendo"):
+            t.setdefault("inicio_tx", (ahora, frac))
+            t0, f0 = t["inicio_tx"]
+            if frac - f0 > 0.005:
+                texto += f" · faltan ≈ {duracion((ahora - t0) * (1 - frac) / (frac - f0))}"
+        st.progress(frac, text=texto)
+        if st.button("Cancelar simulación", key="sim_cancelar"):
+            t["proc"].terminate()
+            st.session_state.pop("sim_trabajo", None)
+            st.rerun()
+        return
+    st.session_state.pop("sim_trabajo", None)
+    datos = leer_json(t["json"]) if rc == 0 else None
+    if datos is None:
+        log = Path(t["log"]).read_text(encoding="utf-8", errors="replace") if Path(t["log"]).exists() else ""
+        st.session_state["sim_error"] = log[-4000:] or f"El programa terminó con el código {rc}"
+    else:
+        st.session_state["simulacion"] = {"archivo": t["archivo"], "datos": datos}
+        st.session_state.pop("curvas_sim", None)
+        segundos_tx = datos["segundos"] - (datos["agente"]["ms"] / 1e3 if datos["agente"]["hecho"] else 0)
+        if datos["archivo"]["bytes_simulados"] >= 1024 * 1024 and segundos_tx > 0:
+            VELOCIDAD_SIM.write_text(json.dumps({"bits_por_s": t["bits"] / segundos_tx}), encoding="utf-8")
+    st.rerun()
+
+
+@st.dialog("Visualizar: cómo viaja el archivo bloque por bloque", width="large")
+def dialogo_visualizar(s):
+    if not VISUAL.exists():
+        st.error(f"No se encontró la figura `{VISUAL.relative_to(RAIZ)}`.")
+        return
+    datos = {
+        "escenario": s["escenario"]["nombre"], "generacion": s["escenario"]["generacion"],
+        "snr_db": s["canal"]["snr_db"], "capas": s["mimo"]["capas"], "palabras": s["mimo"]["palabras_codigo"],
+        "capas_palabra": s["mimo"]["capas_por_palabra"], "snr_capa_db": s["mimo"]["snr_capa_db"],
+        "cifrado": s["cifrado"]["activo"], "rtt_ms": s["escenario"]["rtt_s"] * 1e3, "unidad_ms": s["escenario"]["unidad_s"] * 1e3,
+        "caminos": [{"clave": c["clave"], "nombre": c["nombre"], "bloques": c["bloques_transporte"],
+                     "envios": c["transmisiones"], "fallidos": round(c["bler_final"] * c["bloques_transporte"]),
+                     "identico": c["identico"], "descifrado_ok": c["descifrado_ok"],
+                     "traza": [{"tb": t["tb"], "bits": t["bits"], "qm": t["qm"], "tasa": t["tasa"], "simbolos": t["simbolos"],
+                                "palabra": t["palabra"], "capa_inicial": t["capa_inicial"], "capas": t["capas"],
+                                "errores_capa": t["errores_capa"], "ok": t["ok"], "latencia_ms": t["latencia"] * 1e3,
+                                "bloques_codigo": t.get("bloques_codigo", 0), "crc": t["crc_hex"],
+                                "envios": [{"errores": x["errores"], "ok": x["ok"], "iteraciones": x["iteraciones"], "rv": x["rv"]}
+                                           for x in t["envios"]]} for t in c["traza"]]}
+                    for c in s["caminos"]],
+    }
+    html = VISUAL.read_text(encoding="utf-8").replace("/*__DATOS__*/null", json.dumps(datos, ensure_ascii=False))
+    components.html(html, height=900, scrolling=True)
+
+
+def sim_resumen(s, res):
+    e, m, k, mi = s["escenario"], s["mcs"], s["canal"], s["mimo"]
+    caminos = s["caminos"]
+    L = camino_de(s, "ldpc")
+    capas_txt = f"{mi['capas']} capa{'s' if mi['capas'] != 1 else ''} MIMO" + (" (las eligió el agente)" if mi["eligio_agente"] else "")
+    st.success(f"**{e['nombre']}** · SNR {k['snr_db']:.1f} dB · {capas_txt}, cada una con SNR {mi['snr_capa_db']:.1f} dB · "
+               f"modulación inicial **{MODULACION[m['qm']]}** con tasa **R = {m['tasa']:.3f}** · "
+               f"{'cifrado AES-128' if s['cifrado']['activo'] else 'sin cifrar'} · cada envío dura {e['unidad_s'] * 1e3:.3f} ms")
     if not s["archivo"]["completo"]:
         st.warning(f"Se enviaron los primeros {tam(s['archivo']['bytes_simulados'])} de {tam(s['archivo']['bytes_comprimido'])}; "
                    "sin el archivo completo no se puede descomprimir, así que no hay medida contra el original.")
@@ -675,8 +773,18 @@ def seccion_simulacion(res, d):
     m2.metric("Latencia media por bloque", f"{L['latencia_media'] * 1e3:.3f} ms",
               help="Lo que tarda un bloque en llegar bien, contando los envíos repetidos")
     m3.metric("Bloques que fallaron al primer envío", f"{L['bler_primera']:.1%}",
-              help="BLER: fracción de bloques con el CRC mal en el primer envío. Luego ARQ los repite.")
-    m4.metric("Archivo recuperado", "idéntico" if L["identico"] else ("se pudo descomprimir" if L["descomprimido"] else "dañado"))
+              help="BLER: fracción de bloques con el CRC mal en el primer envío. Luego HARQ los repite.")
+    if s["archivo"]["completo"]:
+        estado = "idéntico" if L["identico"] else ("se pudo descomprimir" if L["descomprimido"] else "dañado")
+    else:
+        estado = "flujo idéntico" if L["descifrado_ok"] else "flujo con errores"
+    m4.metric("Archivo recuperado", estado,
+              help="Después de descifrar y descomprimir" if s["archivo"]["completo"] else "Parte enviada, ya descifrada")
+    if L["bloques_transporte"] < 30:
+        st.caption(f"Sólo se enviaron {L['bloques_transporte']} bloques con LDPC. El ajuste automático de modulación y tasa "
+                   "empieza con la estimación de la SNR y se corrige con cada bloque que falla, así que con pocos bloques "
+                   "pesan más los primeros intentos fallidos y la espera del último; por eso la velocidad y los fallos al "
+                   "primer envío son peores que en la medición del agente o con un archivo grande.")
 
     st.markdown("**Las tres formas de proteger los bits, con el mismo ruido**")
     filas = []
@@ -687,7 +795,7 @@ def seccion_simulacion(res, d):
             "Fallan al final": f"{c['bler_final']:.1%}", "p del canal": prob(c["ber_bruta"]),
             "Bits errados al final": prob(c["ber_final"]), "Velocidad": velocidad(c["goodput"]),
             "Latencia": f"{c['latencia_media'] * 1e3:.3f} ms", "I(X;Y) byte": f"{c['IXY_byte']:.4f}",
-            "Idéntico": "Sí" if c["identico"] else "No"})
+            "Idéntico": ("Sí" if c["identico"] else "No") if s["archivo"]["completo"] else "—"})
     st.dataframe(pd.DataFrame(filas), hide_index=True)
     st.caption(f"**p del canal**: fracción de bits que llegan errados antes de corregir. Es la p del canal binario simétrico de "
                f"la pestaña 5: después de decidir cada bit, este canal se comporta como un BSC con esa p. **Bits errados al "
@@ -728,56 +836,280 @@ def seccion_simulacion(res, d):
     meta_lat = f"≤ {e['lat_max'] * 1e3:g} ms" if e["lat_min"] == e["lat_max"] else f"{e['lat_min'] * 1e3:g} a {e['lat_max'] * 1e3:g} ms"
     req.append(("Latencia (el bloque más lento)", meta_lat, f"{L['latencia_max'] * 1e3:.3f} ms",
                 "Sí" if L["latencia_max"] <= e["lat_max"] + 1e-12 else "No"))
-    if conf.get("hecha"):
-        exito, garantia, N = conf["exito"], conf["confiabilidad_garantizada"], conf["paquetes"]
-        if garantia >= conf["requisito_min"]:
-            veredicto = "Sí"
-        elif exito < conf["requisito_min"]:
-            veredicto = "No"
-        else:
-            veredicto = f"No se puede afirmar con {N:,} mensajes (hacen falta {conf['paquetes_necesarios']:,.0f})"
-        meta_f = (f"≥ {conf['requisito_min']:.5%}" if conf["requisito_min"] == conf["requisito_max"]
-                  else f"{conf['requisito_min']:.5%} a {conf['requisito_max']:.7%}")
-        req.append((f"Confiabilidad: 32 bytes en ≤ {conf['plazo_s'] * 1e3:g} ms", meta_f,
-                    f"{conf['fallas']:,} fallas en {N:,}; se puede asegurar {garantia:.5%}", veredicto))
-    elif e["fiab_min"] > 0:
-        req.append(("Confiabilidad: 32 bytes en ≤ 1 ms", f"≥ {e['fiab_min']:.5%}", "No se probó", "—"))
+    cs = st.session_state.get("confiabilidad_sim")
+    prueba = cs["datos"]["confiabilidad"] if cs and cs["clave"][:2] == (e["clave"], float(k["snr_db"])) else None
+    if prueba:
+        req.append(fila_confiabilidad(prueba))
+    else:
+        req.append(("Confiabilidad: 32 bytes en ≤ 1 ms", meta_confiabilidad(e["fiab_min"], e["fiab_max"]),
+                    "No se probó con esta SNR (pestaña «Confiabilidad»)", "—"))
     st.dataframe(pd.DataFrame(req, columns=["Requisito", "Meta", "Simulado", "Cumple"]), hide_index=True)
     st.caption("Las metas son de la UIT (IMT-2020 para 5G e IMT-2030 para 6G) y valen para toda la red; aquí se comparan con un "
                "solo enlace. Con 0 fallas en N mensajes sólo se puede asegurar (al 95 %) que fallan menos de 3 de cada N.")
 
-    # Constelación e información mutua
-    st.markdown("**Los símbolos que llegan y la información mutua**")
+    b1, b2, b3 = st.columns(3)
+    for col, c in zip((b1, b2, b3), caminos):
+        with col:
+            if c["archivo"]:
+                boton_descarga(c["archivo"], f"Descargar recuperado ({c['nombre']})", f"sim_{c['clave']}_{Path(res['archivo']).name}",
+                               f"dl_sim_{c['clave']}")
+    st.caption("Supuestos: canal con ruido gaussiano (AWGN); las capas MIMO llegan separadas, sin interferencia entre ellas, y "
+               "se reparten la potencia por igual; el receptor no tiene que estimar el canal; sin cabeceras de protocolo; la "
+               "red reparte el tiempo entre bajada y subida (TDD) y repite un bloque 4 envíos después. El escenario 6G usa "
+               "valores candidatos porque 6G todavía no tiene norma.")
+
+
+def sim_paso_a_paso(s, d, res):
+    a, ci, e, mi = s["archivo"], s["cifrado"], s["escenario"], s["mimo"]
+    nombres = {c["clave"]: c["nombre"] for c in s["caminos"]}
+    clave = st.radio("Camino", list(nombres), format_func=nombres.get, horizontal=True, key="sim_paso_camino")
+    c = camino_de(s, clave)
+    if not c["traza"]:
+        st.info("Este camino no envió bloques.")
+        return
+    t = c["traza"][0]
+    G, qm, capas_p = t["bits_codificados"], t["qm"], t["capas"]
+    errores1 = t["envios"][0]["errores"]
+    st.markdown(f"Lo que le pasa al **primer bloque** de **{Path(res['archivo']).name}** con **{c['nombre']}**, con los números "
+                "reales de esta simulación. Los demás bloques siguen los mismos pasos.")
+
+    tx = [("Archivo original", f"{tam(a['bytes_original'])}."),
+          ("Compresión (pestañas 2 y 3)", f"{tam(a['bytes_comprimido'])} con {d['codificacion']['metodo_elegido']}, N = "
+           f"{d['fuente']['n_bits']}." + ("" if a["completo"] else f" Se envían los primeros {tam(a['bytes_simulados'])}.")),
+          ]
+    if ci["activo"]:
+        tx.append(("Cifrado AES-128 en modo contador",
+                   f"Con la clave {ci['clave_hex']} se cifran los bloques contador {ci['contador_hex']}, …+1, …+2, … y eso da el "
+                   f"flujo de clave; el texto cifrado es comprimido ⊕ flujo (XOR bit a bit). Primeros 16 bytes: "
+                   f"{ci['claro_hex'][:32]} ⊕ {ci['flujo_hex'][:32]} = {ci['cifrado_hex'][:32]}."
+                   + (" El AES del programa da el resultado del vector de prueba oficial (FIPS-197)." if ci["vector_fips197_ok"] else "")))
+    else:
+        tx.append(("Cifrado", "Desactivado: se envía el flujo comprimido tal cual."))
+    tx += [("Bloques de transporte", f"El flujo se corta en {c['bloques_transporte']:,} bloques. El primero lleva A = {t['bits']:,} "
+                                     f"bits (empieza con {t['info_hex']}… en hexadecimal)."),
+           ("CRC del bloque", f"Se agregan {t['crc_bits']} bits de CRC{'24A' if t['crc_bits'] == 24 else '16'}: {t['crc_hex']} "
+                              "(hex). El receptor lo recalcula: si no coincide, el bloque llegó mal.")]
+    if clave == "ldpc":
+        partes = (f"se parten en C = {t['bloques_codigo']} bloques de código de K' = {t['k_prima']:,} bits"
+                  + (f" (cada uno con su CRC24B de {t['crc_bloque']} bits)" if t["crc_bloque"] else "")
+                  + f" y se rellenan hasta K = {t['k']:,} bits")
+        tx += [("Segmentación", f"Los {t['bits'] + t['crc_bits']:,} bits {partes}."),
+               ("Código LDPC", f"Cada bloque de código se multiplica por la matriz generadora del LDPC (matriz base BG{t['grafo']} "
+                               f"con submatrices de Zc = {t['zc']}): sale un buffer circular de {t['n_buffer']:,} bits."),
+               ("Adaptación de tasa", f"De cada buffer se toman E = {t['e']:,} bits desde la posición de la versión rv = 0, y se "
+                                      f"entrelazan: G = {G:,} bits en total, tasa R = {t['tasa']:.3f}.")]
+    elif clave == "bloque":
+        tx += [("Código de bloque", f"Los {t['bits'] + t['crc_bits']:,} bits se parten en {t['palabras_bloque']:,} mensajes de "
+                                    f"k = {t['k_bloque']} bits; cada mensaje m se codifica como c = m·G de n = {t['n']} bits "
+                                    f"(tasa {t['k_bloque']}/{t['n']}). Quedan G = {G:,} bits.")]
+    else:
+        tx += [("Sin código", f"Los {t['bits'] + t['crc_bits']:,} bits se envían tal cual (G = {G:,} bits): sólo el CRC "
+                              "puede detectar errores, nada los corrige.")]
+    tx.append(("Modulación", f"{MODULACION[qm]}: cada {qm} bits eligen uno de los {2 ** qm:,} puntos de la constelación → "
+                             f"{t['simbolos']:,} símbolos."))
+    reparto = (f"Los símbolos se reparten por turno entre {capas_p} capa{'s' if capas_p != 1 else ''}: el 1.º a la capa 1, el 2.º a "
+               f"la capa 2, …, así que cada capa lleva {t['simbolos'] // capas_p:,} símbolos y se envía por su antena al mismo tiempo.")
+    if mi["palabras_codigo"] > 1:
+        reparto += (f" Con {mi['capas']} capas van {mi['palabras_codigo']} bloques a la vez (uno por cada {capas_p} capas); este "
+                    f"usa las capas {t['capa_inicial'] + 1} a {t['capa_inicial'] + capas_p}.")
+    tx.append(("Capas MIMO", reparto))
+
+    lista = ", ".join(f"capa {t['capa_inicial'] + i + 1}: {x:,}" for i, x in enumerate(t["errores_capa"]))
+    aire = [("Canal con ruido", f"La potencia se reparte entre las {mi['capas']} capas, así que cada una llega con SNR "
+                                f"{s['canal']['snr_db']:.1f} dB − 10·log₁₀({mi['capas']}) = {mi['snr_capa_db']:.1f} dB. El ruido "
+                                f"mueve cada símbolo; si se decidiera cada bit sin corregir, llegarían errados {errores1:,} de "
+                                f"{G:,} (p = {prob(errores1 / G)}): {lista}.")]
+
+    rx = [("Confianza de cada bit", "El receptor no decide 0 o 1 de golpe: calcula la confianza de cada bit (LLR). Positiva → "
+                                    "parece 0; negativa → parece 1; cuanto más grande, más seguro.")]
+    for i, x in enumerate(t["envios"]):
+        n = i + 1
+        if clave == "ldpc":
+            como = (f"versión rv = {x['rv']}: se suman sus confianzas en el buffer circular (redundancia incremental) y el LDPC "
+                    f"itera {x['iteraciones']} veces en total ({x['iteraciones'] / max(1, t['bloques_codigo']):.1f} por bloque de "
+                    "código) buscando que el síndrome dé cero") if n > 1 else (
+                    f"el LDPC itera {x['iteraciones']} veces en total ({x['iteraciones'] / max(1, t['bloques_codigo']):.1f} por "
+                    "bloque de código) buscando que el síndrome dé cero")
+        elif clave == "bloque":
+            como = ("se suman las confianzas con las de los envíos anteriores (combinación de Chase), " if n > 1 else "") + \
+                   "se decide cada bit y cada palabra se corrige con su síndrome s = r·Hᵀ y el líder de su clase"
+        else:
+            como = ("se suman las confianzas con las de los envíos anteriores (combinación de Chase) y " if n > 1 else "") + \
+                   "se decide cada bit por el signo de su confianza"
+        rx.append((f"Envío {n}", f"{x['errores']:,} bits llegaron errados antes de corregir; {como}. CRC "
+                                 + ("correcto → el receptor responde **ACK**." if x["ok"] else
+                                    ("incorrecto → responde **NACK** y se envía otra vez." if n < len(t["envios"])
+                                     else "incorrecto y ya no quedan envíos: el bloque se entrega con errores."))))
+    rx.append(("Latencia del bloque", f"{t['latencia'] * 1e3:.3f} ms: {len(t['envios'])} envío{'s' if len(t['envios']) != 1 else ''} "
+                                      f"de {e['unidad_s'] * 1e3:.3f} ms; entre un envío y su repetición pasan {e['rtt_s'] * 1e3:.3f} ms."))
+    rx.append(("Todo el archivo", f"{c['bloques_transporte']:,} bloques con {c['transmisiones']:,} envíos; "
+                                  f"{round(c['bler_final'] * c['bloques_transporte']):,} bloques quedaron con errores y "
+                                  f"{c['bits_errados']:,} bits llegaron errados al final."))
+    if ci["activo"]:
+        rx.append(("Descifrado", "Se genera el mismo flujo de clave y se vuelve a hacer XOR (en modo contador, descifrar es lo "
+                                 "mismo que cifrar). " + ("El flujo comprimido quedó idéntico al enviado." if c["descifrado_ok"] else
+                                 f"Quedaron {c['bits_diferentes']:,} bits distintos: en modo contador cada bit errado daña sólo ese "
+                                 "mismo bit, no los demás.")))
+    if a["completo"]:
+        fin = ("El archivo descomprimido es **idéntico** al original." if c["identico"] else
+               "Se pudo descomprimir, pero no es idéntico al original." if c["descomprimido"] else
+               "La cabecera del archivo comprimido llegó dañada y no se pudo descomprimir.")
+    else:
+        fin = "No se descomprime porque sólo se envió una parte del archivo."
+    rx.append(("Descompresión", fin))
+
+    n = 0
+    for titulo, filas in (("En el transmisor", tx), ("En el aire", aire), ("En el receptor", rx)):
+        st.markdown(f"##### {titulo}")
+        lineas = []
+        for paso, texto in filas:
+            n += 1
+            lineas.append(f"{n}. **{paso}.** {texto}")
+        st.markdown("\n".join(lineas))
+
+
+def sim_mimo(s):
+    mi, k = s["mimo"], s["canal"]
+    st.markdown("Con varias antenas en el transmisor y en el receptor se pueden enviar varios flujos de símbolos al mismo tiempo "
+                "y en la misma frecuencia; cada flujo es una **capa**. Los símbolos se reparten por turno (TS 38.211): el 1.º va "
+                "por la capa 1, el 2.º por la capa 2, y así. La potencia del transmisor se reparte por igual, así que con L "
+                "capas cada una llega con **SNR/L** (3 dB menos cada vez que se duplica L). Más capas mandan más símbolos por "
+                "unidad de tiempo, pero cada símbolo llega con más ruido y hay que usar una modulación o una tasa más bajas. "
+                "Una palabra de código va por hasta 4 capas; con 8 capas se envían 2 bloques a la vez.")
+    cap = pd.DataFrame(mi["capacidad_por_capas"])
+    cap["SNR por capa (dB)"] = k["snr_db"] - 10 * np.log10(cap["capas"])
+    cap["Elegida"] = cap["capas"] == mi["capas"]
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        base = alt.Chart(cap).encode(x=alt.X("capas:O", title="Capas MIMO (L)"),
+                                     y=alt.Y("bits_por_uso:Q", title="Capacidad: L · log₂(1 + SNR/L) bits por uso",
+                                             axis=alt.Axis(grid=True, gridOpacity=0.3)),
+                                     tooltip=[alt.Tooltip("capas:O", title="Capas"),
+                                              alt.Tooltip("SNR por capa (dB):Q", format=".1f"),
+                                              alt.Tooltip("bits_por_uso:Q", title="Bits por uso", format=".2f")])
+        st.altair_chart((base.mark_bar(cornerRadiusEnd=4, size=34).encode(
+                            color=alt.condition("datum.Elegida", alt.value(COLORES_CAMINO[0]), alt.value("#c9ccd1")))
+                         + base.mark_text(dy=-8, fontSize=11, color="#57606a").encode(text=alt.Text("bits_por_uso:Q", format=".2f")))
+                        .properties(height=280), width="stretch")
+        st.caption(f"Con SNR = {k['snr_db']:.1f} dB. En azul, las capas de esta simulación ({mi['capas']}).")
+    with c2:
+        filas = []
+        for c in s["caminos"]:
+            for x in c["por_capa"]:
+                filas.append({"Código": c["nombre"], "Capa": x["capa"], "Palabra de código": x["palabra"],
+                              "Bits enviados": f"{x['bits']:,}" if x["bits"] else "—",
+                              "Errados antes de corregir": f"{x['errores']:,}" if x["bits"] else "—",
+                              "p": prob(x["ber"]) if x["bits"] else "—"})
+        st.dataframe(pd.DataFrame(filas), hide_index=True, height=300)
+        st.caption(f"Primer envío de cada bloque. Todas las capas tienen la misma SNR ({mi['snr_capa_db']:.1f} dB), así que su p "
+                   "es casi igual; «—»: esa capa no llevó bloques de ese camino.")
+
+
+def sim_agente(s):
+    ag = s["agente"]
+    if not ag["hecho"]:
+        st.info("En **Capas MIMO** elige «Que decida el agente» y vuelve a simular.")
+        return
+    op = pd.DataFrame(ag["opciones"])
+    op["i"] = range(len(op))
+    op["Elegida"] = np.where(op["i"] == ag["elegido"], "Agente", "Otras")
+    elegida, mejor = op.iloc[ag["elegido"]], op.iloc[ag["mejor_medido"]]
+    m1, m2, m3, m4 = st.columns([3, 3, 2, 2])
+    m1.metric("Elegida por el agente", elegida["nombre"])
+    m2.metric("Mejor en la medición", mejor["nombre"])
+    m3.metric("Opciones medidas", f"{len(op)}")
+    m4.metric("Bloques por opción", f"{ag['bloques_medida']}")
+
+    op["Mbit/s"] = op["goodput"] / 1e6
+    op["Texto"] = [velocidad(g) for g in op["goodput"]]
+    orden = list(op.sort_values("goodput", ascending=False)["nombre"])
+    base = alt.Chart(op).encode(
+        y=alt.Y("nombre:N", sort=orden, title=None, axis=alt.Axis(labelLimit=240)),
+        x=alt.X("Mbit/s:Q", title="Bits entregados a tiempo por segundo (Mbit/s), medidos", axis=alt.Axis(grid=True, gridOpacity=0.3)),
+        tooltip=[alt.Tooltip("nombre:N", title="Opción"), alt.Tooltip("Texto:N", title="Medido"),
+                 alt.Tooltip("bler_primera:Q", title="Fallan al 1.er envío", format=".1%"),
+                 alt.Tooltip("pruebas:Q", title="Pruebas del agente")])
+    st.altair_chart((base.mark_bar(cornerRadiusEnd=4, height=14).encode(
+                        color=alt.Color("Elegida:N", scale=alt.Scale(domain=["Agente", "Otras"], range=[COLORES_CAMINO[0], "#c9ccd1"]),
+                                        legend=alt.Legend(orient="top", title=None)))
+                     + base.mark_text(align="left", dx=4, fontSize=11, color="#57606a").encode(text="Texto:N"))
+                    .properties(height=alt.Step(24)), width="stretch")
+
+    tabla = pd.DataFrame({
+        "Opción": op["nombre"], "Medido": op["Texto"], "Fallan al 1.er envío": [f"{x:.0%}" for x in op["bler_primera"]],
+        "Fallan al final": [f"{x:.0%}" for x in op["bler_final"]], "Envíos por bloque": [f"{x:.2f}" for x in op["envios_medios"]],
+        "Latencia media": [f"{x * 1e3:.3f} ms" for x in op["latencia_media"]],
+        "Llegan a tiempo": [f"{x:.0%}" if b else "—" for x, b in zip(op["a_tiempo"], op["goodput"] > 0)],
+        "Pruebas del agente": op["pruebas"], "Recompensa media del agente": [f"{x:,.1f} Mbit/s" for x in op["recompensa_media"]]})
+    estilo = tabla.style.apply(lambda f: ["background-color: #dbe9fb; font-weight: 600" if f.name == ag["elegido"] else ""
+                                          for _ in f], axis=1)
+    st.dataframe(estilo, hide_index=True)
+
+    h = pd.DataFrame(ag["historia"])
+    h["Opción"] = [ag["opciones"][i]["nombre"] for i in h["opcion"]]
+    h["Tipo"] = np.where(h["explora"], "Explora (al azar)", "Usa la mejor conocida")
+    puntos = alt.Chart(h).mark_point(size=60, filled=True).encode(
+        x=alt.X("paso:Q", title="Prueba del agente", axis=alt.Axis(grid=True, gridOpacity=0.3)),
+        y=alt.Y("Opción:N", sort=orden, title=None, axis=alt.Axis(labelLimit=240)),
+        color=alt.Color("Tipo:N", scale=alt.Scale(domain=["Explora (al azar)", "Usa la mejor conocida"],
+                                                  range=["#eb6834", COLORES_CAMINO[0]]),
+                        legend=alt.Legend(orient="top", title=None)),
+        shape=alt.Shape("Tipo:N", scale=alt.Scale(domain=["Explora (al azar)", "Usa la mejor conocida"], range=["triangle-up", "circle"]),
+                        legend=None),
+        tooltip=[alt.Tooltip("paso:Q", title="Prueba"), "Opción:N", "Tipo:N",
+                 alt.Tooltip("recompensa:Q", title="Recompensa (Mbit/s)", format=",.1f"),
+                 alt.Tooltip("epsilon:Q", title="ε", format=".2f")])
+    st.altair_chart(puntos.properties(height=alt.Step(24)), width="stretch")
+
+
+def sim_constelacion(s):
+    m, k, mi, b = s["mcs"], s["canal"], s["mimo"], s["bicm"]
+    L = camino_de(s, "ldpc")
+    qm = L["traza"][0]["qm"] if L["traza"] else m["qm"]
     k1, k2 = st.columns([1, 1])
     with k1:
         rx = pd.DataFrame(s["constelacion"], columns=["I", "Q"])
-        ideal = puntos_qam(m["qm"])
+        ideal = puntos_qam(qm)
         lim = float(max(np.abs(ideal.values).max() * 1.6, 0.5))
         escala = alt.Scale(domain=[-lim, lim])
         pts = alt.Chart(rx).mark_circle(size=9, opacity=0.35, color=COLORES_CAMINO[0]).encode(
             x=alt.X("I:Q", scale=escala, title="Componente I"), y=alt.Y("Q:Q", scale=escala, title="Componente Q"))
         ref = alt.Chart(ideal).mark_point(shape="cross", size=30, color="#1f2328", filled=True).encode(x="I:Q", y="Q:Q")
-        st.altair_chart((pts + ref).properties(height=330), width="stretch")
-        st.caption(f"Cada cruz es un símbolo de {MODULACION[m['qm']]} ({m['qm']} bits). Los puntos son {len(rx):,} símbolos "
-                   "recibidos: el ruido los mueve, y si uno cae más cerca de otra cruz, sus bits llegan errados.")
+        st.altair_chart((pts + ref).properties(height=360), width="stretch")
+    niveles = sorted(set(np.round(ideal["I"], 9)))
+    paso = niveles[1] - niveles[0] if len(niveles) > 1 else 2 * niveles[0]
+    sigma = float(np.sqrt(10 ** (-mi["snr_capa_db"] / 10) / 2))
     with k2:
-        b = s["bicm"]
-        tabla_medidas([
-            ("Información mutua por bit enviado", f"{b['info_mutua_bit']:.4f} bits"),
-            ("Información mutua por símbolo", f"{b['info_mutua_simbolo']:.3f} bits"),
-            ("Bits de mensaje por símbolo (R × bits por símbolo)", f"{b['tasa_codigo_simbolo']:.3f} bits"),
-            ("Capacidad del canal, log₂(1 + SNR)", f"{k['capacidad_shannon']:.3f} bits"),
-        ])
-        st.caption("La información mutua entre cada bit enviado y lo que recibe el receptor dice cuánta información deja pasar el "
-                   "canal. Si el código manda menos bits de mensaje por símbolo que esa información, puede corregir los "
-                   "errores; si manda más, el bloque falla y hay que repetirlo. Nada puede pasar de la capacidad.")
-        if L.get("mcs_usados"):
-            st.markdown("**Modulación y tasa que usó el ajuste automático**")
-            st.dataframe(pd.DataFrame([{"Modulación": MODULACION[x["qm"]], "Bits por símbolo": x["qm"], "Tasa R": f"{x['tasa']:.3f}",
-                                        "Bloques": x["bloques"]} for x in L["mcs_usados"]]), hide_index=True)
-            st.caption("Si un bloque falla en el primer envío, los siguientes usan una tasa más baja o menos bits por símbolo; "
-                       "si llegan bien, se vuelve a subir poco a poco.")
-
+        st.markdown("**Cómo leer esta imagen**")
+        st.markdown(
+            f"- Cada **cruz negra** es uno de los {2 ** qm:,} puntos de {MODULACION[qm]}. El transmisor sólo envía esos puntos, y "
+            f"cada uno representa un grupo de {qm} bits; puntos vecinos difieren en un solo bit.\n"
+            f"- Cada **punto azul** es un símbolo que llegó al receptor ({len(rx):,} del primer bloque): el punto enviado más "
+            "el ruido del canal. Por eso se forma una nube alrededor de cada cruz.\n"
+            f"- **I** y **Q** son las dos partes de la señal (las dos ondas que se suman en la portadora); cada símbolo es un "
+            "par (I, Q).\n"
+            f"- El tamaño de la nube lo fija la SNR **por capa**: {mi['snr_capa_db']:.1f} dB. El ruido se desvía en promedio "
+            f"σ = {sigma:.3f} en cada eje, y las cruces vecinas están a {paso:.3f}; la frontera entre dos cruces queda a "
+            f"{paso / 2:.3f} de cada una.\n"
+            f"- Si un punto pasa la frontera hacia otra cruz, ese bit llega errado: le pasó a una fracción p = "
+            f"{prob(L['ber_bruta'])} de los bits (pestaña Resumen, «p del canal»).\n"
+            "- El receptor usa la distancia a las fronteras como confianza de cada bit: lejos, muy seguro; cerca, poco seguro. "
+            "Con esas confianzas el código corrige los bits que cruzaron.")
+    st.markdown("**Información que deja pasar el canal**")
+    tabla_medidas([
+        ("Información mutua por bit enviado", f"{b['info_mutua_bit']:.4f} bits"),
+        ("Información mutua por símbolo", f"{b['info_mutua_simbolo']:.3f} bits"),
+        ("Bits de mensaje por símbolo (R × bits por símbolo)", f"{b['tasa_codigo_simbolo']:.3f} bits"),
+        ("Capacidad de una capa, log₂(1 + SNR por capa)", f"{np.log2(1 + 10 ** (mi['snr_capa_db'] / 10)):.3f} bits"),
+    ])
+    st.caption("Si el código manda menos bits de mensaje por símbolo que la información mutua, puede corregir los errores; si "
+               "manda más, el bloque falla y hay que repetirlo. Nada puede pasar de la capacidad.")
+    if L.get("mcs_usados"):
+        st.markdown("**Modulación y tasa que usó el ajuste automático (LDPC)**")
+        st.dataframe(pd.DataFrame([{"Modulación": MODULACION[x["qm"]], "Bits por símbolo": x["qm"], "Tasa R": f"{x['tasa']:.3f}",
+                                    "Bloques": x["bloques"]} for x in L["mcs_usados"]]), hide_index=True)
+        st.caption("Si un bloque falla en el primer envío, los siguientes usan una tasa más baja o menos bits por símbolo; si "
+                   "llegan bien, se vuelve a subir poco a poco.")
     if L.get("ldpc"):
         x = L["ldpc"]
         with st.expander("Detalles del LDPC de la norma (primer bloque)"):
@@ -789,11 +1121,12 @@ def seccion_simulacion(res, d):
                        "que H es enorme y casi toda de ceros, y que el receptor corrige con la confianza de cada bit, repasando "
                        "las ecuaciones de paridad varias veces (iteraciones) hasta que el síndrome da cero.")
 
-    # Curvas BLER frente a SNR
-    st.markdown("**Bloques con error según la SNR**")
-    st.caption("Un bloque de 4096 bits, un solo envío y la modulación de esta simulación: el LDPC con su tasa, el LDPC con la "
-               "misma tasa que el código de bloque, el código de bloque y sin código. Las líneas verticales marcan el límite de "
-               "Shannon de cada tasa: ningún código puede funcionar a la izquierda de su línea.")
+
+def sim_curvas(s, res):
+    e, k = s["escenario"], s["canal"]
+    st.caption("Un bloque de 4096 bits, un solo envío, una capa y la modulación de esta simulación: el LDPC con su tasa, el LDPC "
+               "con la misma tasa que el código de bloque, el código de bloque y sin código. Las líneas verticales marcan el "
+               "límite de Shannon de cada tasa: ningún código puede funcionar a la izquierda de su línea.")
     if st.button("Calcular curvas", key="sim_curvas"):
         ruta_json = SALIDA / f"curvas_{Path(res['archivo']).stem}.json"
         with st.spinner("Enviando bloques con cada SNR..."):
@@ -805,48 +1138,140 @@ def seccion_simulacion(res, d):
         else:
             st.session_state["curvas_sim"] = json.loads(ruta_json.read_text(encoding="utf-8"))
     cv = st.session_state.get("curvas_sim")
-    if cv:
-        nombres = {c["clave"]: c["nombre"] for c in cv["curvas"]}
-        piso = 0.5 / cv["bloques_max"]  # los puntos sin errores se dibujan en el piso del eje
-        pts = pd.DataFrame([p for p in cv["puntos"] if p["simulado"]])
-        pts["Curva"] = pts["curva"].map(nombres)
-        pts["y"] = pts["bler"].clip(lower=piso)
-        pts["Lectura"] = [f"{b:.3f}" if b > 0 else f"0 (menos de 1 en {n})" for b, n in zip(pts["bler"], pts["bloques"])]
-        dominio = [nombres[c] for c in CAMINOS if c in nombres]
-        rango = [COLORES_CAMINO[i] for i, c in enumerate(CAMINOS) if c in nombres]
-        color = alt.Color("Curva:N", scale=alt.Scale(domain=dominio, range=rango), legend=alt.Legend(orient="top", title=None))
-        forma = alt.Shape("Curva:N", scale=alt.Scale(domain=dominio, range=["circle", "diamond", "square", "triangle-up"][:len(dominio)]),
-                          legend=None)
-        lineas = alt.Chart(pts).mark_line(strokeWidth=2).encode(
-            x=alt.X("snr_db:Q", title="SNR (dB)", axis=alt.Axis(grid=True, gridOpacity=0.3)),
-            y=alt.Y("y:Q", title="Fracción de bloques con error (BLER)", scale=alt.Scale(type="log", domain=[piso, 1], nice=False),
-                    axis=alt.Axis(grid=True, gridOpacity=0.3, values=[v for v in (1, 0.1, 0.01, 0.001) if v >= piso],
-                                  format="~g")),
-            color=color, strokeDash=alt.StrokeDash("Curva:N", legend=None,
-                                                   scale=alt.Scale(domain=dominio, range=[[1, 0], [6, 3], [1, 0], [2, 2]][:len(dominio)])))
-        aviso = ["Curva:N", alt.Tooltip("snr_db:Q", title="SNR (dB)"), alt.Tooltip("Lectura:N", title="BLER"),
-                 alt.Tooltip("bloques:Q", title="Bloques enviados")]
-        marcas = (alt.Chart(pts[pts["bler"] > 0]).mark_point(size=50, filled=True).encode(
-                      x="snr_db:Q", y="y:Q", color=color, shape=forma, tooltip=aviso)
-                  + alt.Chart(pts[pts["bler"] == 0]).mark_point(size=50, filled=False, strokeWidth=1.5).encode(
-                      x="snr_db:Q", y="y:Q", color=color, shape=forma, tooltip=aviso))
-        lim = pd.DataFrame([{"Curva": c["nombre"], "x": c["limite_shannon_db"]} for c in cv["curvas"]])
-        reglas = alt.Chart(lim).mark_rule(strokeDash=[2, 3], opacity=0.7).encode(
-            x="x:Q", color=color, tooltip=["Curva:N", alt.Tooltip("x:Q", title="Límite de Shannon (dB)", format=".2f")])
-        st.altair_chart((lineas + marcas + reglas).properties(height=300), width="stretch")
-        st.caption(f"{MODULACION[cv['qm']]}, hasta {cv['bloques_max']} bloques por punto. Los puntos huecos no tuvieron errores. "
-                   "La distancia horizontal entre dos curvas a la misma altura es cuánta SNR ahorra un código frente al otro "
-                   "(ganancia de codificación).")
+    if not cv:
+        return
+    nombres = {c["clave"]: c["nombre"] for c in cv["curvas"]}
+    piso = 0.5 / cv["bloques_max"]  # los puntos sin errores se dibujan en el piso del eje
+    pts = pd.DataFrame([p for p in cv["puntos"] if p["simulado"]])
+    pts["Curva"] = pts["curva"].map(nombres)
+    pts["y"] = pts["bler"].clip(lower=piso)
+    pts["Lectura"] = [f"{b:.3f}" if b > 0 else f"0 (menos de 1 en {n})" for b, n in zip(pts["bler"], pts["bloques"])]
+    dominio = [nombres[c] for c in CAMINOS if c in nombres]
+    rango = [COLORES_CAMINO[i] for i, c in enumerate(CAMINOS) if c in nombres]
+    color = alt.Color("Curva:N", scale=alt.Scale(domain=dominio, range=rango), legend=alt.Legend(orient="top", title=None))
+    forma = alt.Shape("Curva:N", scale=alt.Scale(domain=dominio, range=["circle", "diamond", "square", "triangle-up"][:len(dominio)]),
+                      legend=None)
+    lineas = alt.Chart(pts).mark_line(strokeWidth=2).encode(
+        x=alt.X("snr_db:Q", title="SNR (dB)", axis=alt.Axis(grid=True, gridOpacity=0.3)),
+        y=alt.Y("y:Q", title="Fracción de bloques con error (BLER)", scale=alt.Scale(type="log", domain=[piso, 1], nice=False),
+                axis=alt.Axis(grid=True, gridOpacity=0.3, values=[v for v in (1, 0.1, 0.01, 0.001) if v >= piso],
+                              format="~g")),
+        color=color, strokeDash=alt.StrokeDash("Curva:N", legend=None,
+                                               scale=alt.Scale(domain=dominio, range=[[1, 0], [6, 3], [1, 0], [2, 2]][:len(dominio)])))
+    aviso = ["Curva:N", alt.Tooltip("snr_db:Q", title="SNR (dB)"), alt.Tooltip("Lectura:N", title="BLER"),
+             alt.Tooltip("bloques:Q", title="Bloques enviados")]
+    marcas = (alt.Chart(pts[pts["bler"] > 0]).mark_point(size=50, filled=True).encode(
+                  x="snr_db:Q", y="y:Q", color=color, shape=forma, tooltip=aviso)
+              + alt.Chart(pts[pts["bler"] == 0]).mark_point(size=50, filled=False, strokeWidth=1.5).encode(
+                  x="snr_db:Q", y="y:Q", color=color, shape=forma, tooltip=aviso))
+    lim = pd.DataFrame([{"Curva": c["nombre"], "x": c["limite_shannon_db"]} for c in cv["curvas"]])
+    reglas = alt.Chart(lim).mark_rule(strokeDash=[2, 3], opacity=0.7).encode(
+        x="x:Q", color=color, tooltip=["Curva:N", alt.Tooltip("x:Q", title="Límite de Shannon (dB)", format=".2f")])
+    st.altair_chart((lineas + marcas + reglas).properties(height=300), width="stretch")
+    st.caption(f"{MODULACION[cv['qm']]}, hasta {cv['bloques_max']} bloques por punto. Los puntos huecos no tuvieron errores. "
+               "La distancia horizontal entre dos curvas a la misma altura es cuánta SNR ahorra un código frente al otro "
+               "(ganancia de codificación).")
 
-    b1, b2, b3 = st.columns(3)
-    for col, c in zip((b1, b2, b3), caminos):
-        with col:
-            if c["archivo"]:
-                boton_descarga(c["archivo"], f"Descargar recuperado ({c['nombre']})", f"sim_{c['clave']}_{Path(res['archivo']).name}",
-                               f"dl_sim_{c['clave']}")
-    st.caption("Supuestos: canal con ruido gaussiano (AWGN) y una sola antena; el receptor no tiene que estimar el canal; sin "
-               "cabeceras de protocolo; la red reparte el tiempo entre bajada y subida (TDD) y repite un bloque 4 envíos después. "
-               "El escenario 6G usa valores candidatos porque 6G todavía no tiene norma.")
+
+def seccion_simulacion(res, d):
+    st.subheader("Simulación del envío por 5G y 6G")
+    st.markdown("El archivo comprimido se **cifra** y se envía **bloque por bloque** como lo haría una red 5G: a cada bloque se "
+                "le agrega un **CRC** para detectar errores y un **código de control de error**, los bits se convierten en "
+                "**símbolos** (modulación) que se reparten entre varias antenas (**capas MIMO**), el canal les suma **ruido**, "
+                "el receptor corrige lo que puede y pide repetir lo que llegó mal (**HARQ**, el ARQ de 5G). Al final se "
+                "descifra, se descomprime y se compara con el original. Con el mismo ruido se comparan tres formas de proteger "
+                "los bits: el **LDPC** de 5G, el **código de bloque** de la barra lateral y **sin código** (sólo CRC).")
+
+    ag = st.session_state.get("agente")
+    if ag and ag["archivo"] == res["archivo"]:
+        ruta_comp, como = Path(ag["datos"]["decision"]["archivo_comprimido"]), f"agente de IA: {ag['datos']['decision']['nombre']}"
+    else:
+        ruta_comp, como = Path(d["compresion"]["archivo"]), f"{d['codificacion']['metodo_elegido']}, N = {d['fuente']['n_bits']}"
+    bytes_comp = ruta_comp.stat().st_size if ruta_comp.exists() else 0
+
+    c1, c2, c3 = st.columns(3)
+    escenario = c1.selectbox("Escenario", list(ESCENARIOS_SIM), format_func=lambda x: ESCENARIOS_SIM[x][0], key="sim_esc")
+    snr = c2.number_input("Relación señal a ruido, SNR (dB)", min_value=-10.0, max_value=50.0, value=ESCENARIOS_SIM[escenario][1],
+                          step=1.0, key=f"sim_snr_{escenario}",
+                          help="Cuánto más fuerte es la señal que el ruido en el receptor (sumando todas las antenas).")
+    capas = c3.selectbox("Capas MIMO", list(CAPAS_SIM), format_func=CAPAS_SIM.get, key="sim_capas",
+                         help="Flujos de símbolos que se envían a la vez por antenas distintas. El agente prueba 1, 2, 4 y 8 "
+                              "capas con cada código y se queda con la opción que entrega más bits a tiempo.")
+    c4, c5 = st.columns(2)
+    cifrar = c4.checkbox("Cifrar con AES-128 antes de enviar", value=True, key="sim_cifrar",
+                         help="AES-128 en modo contador, el cifrado de 5G (128-NEA2). El receptor lo descifra al final.")
+    v = leer_json(VELOCIDAD_SIM)
+    rapidez = v["bits_por_s"] if v else 3.0e6
+    estimado = duracion(bytes_comp * 8 / rapidez)
+    completo = c5.checkbox("Archivo completo", value=bytes_comp <= LIMITE_SIM, key="sim_completo",
+                           help="Sin esta opción se envían los primeros 4 MB del archivo comprimido.")
+    harq = min(int(arq_max), HARQ_MAX_SIM)
+    st.caption(f"Se envía el archivo comprimido: **{tam(bytes_comp)}** ({como}). Código de bloque: el de la barra lateral "
+               f"({especificacion_fec}). Envíos máximos por bloque: **{harq}**, del control «ARQ» de la barra lateral"
+               + (f" (la simulación admite hasta {HARQ_MAX_SIM})" if int(arq_max) > HARQ_MAX_SIM else "") + ".")
+    if completo and bytes_comp > LIMITE_SIM:
+        st.info(f"Todo el archivo ({tam(bytes_comp)}) tardará unos **{estimado}** en este equipo"
+                + (" (según la rapidez de la última simulación)" if v else "") + ". Usa unos "
+                f"{tam(3 * bytes_comp + d['fuente']['tamano_original'])} de memoria. Puedes seguir usando la página mientras "
+                "tanto.")
+
+    trabajo = st.session_state.get("sim_trabajo")
+    sim = st.session_state.get("simulacion")
+    if not (sim and sim["archivo"] == res["archivo"]) and trabajo is None:
+        # La última simulación de este archivo queda guardada: se muestra sin repetirla (con archivos grandes tarda minutos)
+        guardada = SALIDA / f"simulacion_{Path(res['archivo']).stem}" / "simulacion.json"
+        datos = leer_json(guardada)
+        if datos and "mimo" in datos and "agente" in datos and datos["archivo"]["bytes_comprimido"] == bytes_comp:
+            sim = {"archivo": res["archivo"], "datos": datos, "guardada": guardada.stat().st_mtime}
+            st.session_state["simulacion"] = sim
+    hay = bool(sim and sim["archivo"] == res["archivo"])
+    b1, b2, _ = st.columns([1, 1, 3])
+    if b1.button("Simular", type="primary", key="sim_boton", disabled=trabajo is not None, width="stretch"):
+        salida = SALIDA / f"simulacion_{Path(res['archivo']).stem}"
+        salida.mkdir(parents=True, exist_ok=True)
+        args = [str(DATA / res["archivo"]), "--simular", "--comprimido", str(ruta_comp), "--escenario", escenario,
+                "--snr", repr(float(snr)), "--harq", str(harq), "--fec", especificacion_fec, "--capas", capas,
+                "--paquetes", "0", "--salida", str(salida), "--json", str(salida / "simulacion.json")]
+        if not cifrar:
+            args.append("--sin-cifrado")
+        bits = bytes_comp * 8 if completo else min(bytes_comp, LIMITE_SIM) * 8
+        if not completo:
+            args += ["--max-bytes", str(LIMITE_SIM)]
+        lanzar_simulacion(args, salida / "simulacion.json", salida / "progreso.json", res["archivo"], bits)
+        st.rerun()
+    if b2.button("Visualizar", key="sim_visualizar", disabled=not hay, width="stretch",
+                 help="Figura animada del viaje del archivo, bloque por bloque, por la red y por cada capa MIMO"):
+        dialogo_visualizar(sim["datos"])
+    progreso_simulacion()
+    error = st.session_state.pop("sim_error", None)
+    if error:
+        st.error("La simulación terminó con error")
+        st.code(error)
+
+    sub = st.tabs(["Resumen", "Paso a paso", "Capas MIMO", "Agente", "Constelación", "Curvas BLER", "Confiabilidad"])
+    with sub[6]:
+        seccion_confiabilidad(escenario, float(snr), harq)
+    if not hay:
+        for t in sub[:6]:
+            with t:
+                st.info("Elige el escenario y pulsa **Simular** para enviar el archivo.")
+        return
+    s = sim["datos"]
+    if sim.get("guardada"):
+        st.caption(f"Resultado guardado de la última simulación de este archivo ({time.strftime('%d/%m/%Y %H:%M', time.localtime(sim['guardada']))}, "
+                   f"tardó {duracion(s['segundos'])}). Pulsa **Simular** para repetirla con otros valores.")
+    with sub[0]:
+        sim_resumen(s, res)
+    with sub[1]:
+        sim_paso_a_paso(s, d, res)
+    with sub[2]:
+        sim_mimo(s)
+    with sub[3]:
+        sim_agente(s)
+    with sub[4]:
+        sim_constelacion(s)
+    with sub[5]:
+        sim_curvas(s, res)
 
 
 # ---------------------------------------------------------------- interfaz

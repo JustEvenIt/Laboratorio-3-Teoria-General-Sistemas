@@ -216,15 +216,28 @@ Codificado Compresor::codificarLZW(const Fuente& f, uint64_t entradasExtra, size
 // --- DECODIFICACIÓN ---
 
 vector<uint32_t> Compresor::decodificar(const Codificado& c, uint64_t n, uint32_t M) {
-    const uint32_t BORRADO = M;
     vector<uint32_t> salida;
     salida.reserve(n);
-    LectorBits r(c.carga.data(), c.bitsCarga);
+    decodificarCon(c, c.carga.data(), c.bitsCarga, n, M, [&](uint32_t id) { salida.push_back(id); });
+    return salida;
+}
+
+void Compresor::decodificarCon(const Codificado& c, const uint8_t* carga, uint64_t bitsCarga, uint64_t n, uint32_t M,
+                               const function<void(uint32_t)>& emitir) {
+    const uint32_t BORRADO = M;
+    uint64_t emitidos = 0;
+    auto dar = [&](uint32_t id) {
+        if (emitidos < n) {
+            emitir(id);
+            ++emitidos;
+        }
+    };
+    LectorBits r(carga, bitsCarga);
 
     if (c.metodo == METODO_UNIFORME) {
         for (uint64_t i = 0; i < n; ++i) {
             uint64_t v = r.leer(c.anchoUniforme);
-            salida.push_back(r.agotado || v >= M ? BORRADO : (uint32_t)v);
+            dar(r.agotado || v >= M ? BORRADO : (uint32_t)v);
         }
     }
     else if (c.metodo == METODO_HUFFMAN) {
@@ -254,13 +267,13 @@ vector<uint32_t> Compresor::decodificar(const Codificado& c, uint64_t n, uint32_
                     break;
                 }
             }
-            salida.push_back(r.agotado ? BORRADO : simbolo);
+            dar(r.agotado ? BORRADO : simbolo);
         }
     }
     else if (c.metodo == METODO_LZW) {
         // Entradas >= M: prefijo + último símbolo. Las entradas "borrado" tienen largo 1.
         const uint64_t cap = c.capDiccionario;
-        vector<uint32_t> prefijo, ultimo, primero;
+        vector<uint32_t> prefijo, ultimo, primero, frase;
         vector<uint64_t> largo;
 
         auto primeroDe = [&](uint64_t cod) -> uint32_t { return cod < M ? (uint32_t)cod : primero[cod - M]; };
@@ -272,19 +285,20 @@ vector<uint32_t> Compresor::decodificar(const Codificado& c, uint64_t n, uint32_
                 prefijo.push_back(pre); ultimo.push_back(s); primero.push_back(primeroDe(pre)); largo.push_back(largoDe(pre) + 1);
             }
         };
+        // La frase se arma de atrás hacia adelante siguiendo los prefijos y se entrega en orden
         auto expandir = [&](uint64_t cod) {
-            uint64_t len = largoDe(cod);
-            size_t base = salida.size();
-            salida.resize(base + len);
-            for (size_t pos = base + len; pos > base;) {
-                if (cod < M) { salida[--pos] = (uint32_t)cod; break; }
-                salida[--pos] = ultimo[cod - M];
+            const uint64_t len = largoDe(cod);
+            frase.resize(len);
+            for (uint64_t pos = len; pos > 0;) {
+                if (cod < M) { frase[--pos] = (uint32_t)cod; break; }
+                frase[--pos] = ultimo[cod - M];
                 cod = prefijo[cod - M];
             }
+            for (uint32_t id : frase) dar(id);
         };
 
         uint32_t previo = NINGUNO;
-        for (uint64_t k = 0; salida.size() < n; ++k) {
+        for (uint64_t k = 0; emitidos < n; ++k) {
             int ancho = bitsPara(min<uint64_t>(M + k, cap));
             uint64_t codigo = r.leer(ancho);
             if (r.agotado) break;
@@ -302,14 +316,12 @@ vector<uint32_t> Compresor::decodificar(const Codificado& c, uint64_t n, uint32_
                 previo = (uint32_t)codigo;
             } else {
                 if (agrega) agregar(NINGUNO, BORRADO);
-                salida.push_back(BORRADO);
+                dar(BORRADO);
                 previo = NINGUNO;
             }
         }
     }
-
-    salida.resize(n, BORRADO);
-    return salida;
+    while (emitidos < n) dar(BORRADO);  // lo que faltó por errores o por fin del flujo
 }
 
 // --- ARCHIVO COMPRIMIDO ---
@@ -362,7 +374,7 @@ bool Compresor::descomprimirArchivo(const string& ruta, vector<unsigned char>& s
     return deserializar(d, salida, error);
 }
 
-bool Compresor::deserializar(const vector<uint8_t>& d, vector<unsigned char>& salida, string& error) {
+bool Compresor::deserializar(const vector<uint8_t>& d, vector<unsigned char>& salida, string& error, uint64_t maxSalida) {
     size_t pos = 0;
     auto hay = [&](uint64_t bytes) { return bytes <= d.size() - pos; };
     auto leerU = [&](int bytes) {
@@ -378,7 +390,10 @@ bool Compresor::deserializar(const vector<uint8_t>& d, vector<unsigned char>& sa
     c.metodo = d[pos++];
     uint64_t nBits = leerU(4), tamOriginal = leerU(8), n = leerU(8), M = leerU(8);
     uint64_t B = nBits / 8;
-    if (B == 0 || M > n || !hay(M * B)) { error = "Cabecera corrupta"; return false; }
+    if (B == 0 || M > n || !hay(M * B) || tamOriginal > maxSalida || (n > 0 && n - 1 > tamOriginal / B)) {
+        error = "Cabecera corrupta";
+        return false;
+    }
     const unsigned char* alfabeto = d.data() + pos;
     pos += M * B;
 
@@ -394,12 +409,14 @@ bool Compresor::deserializar(const vector<uint8_t>& d, vector<unsigned char>& sa
     if (!hay(8)) { error = "Cabecera corrupta"; return false; }
     c.bitsCarga = leerU(8);
     if (!hay((c.bitsCarga + 7) / 8)) { error = "Carga incompleta"; return false; }
-    c.carga.assign(d.begin() + pos, d.begin() + pos + (c.bitsCarga + 7) / 8);
 
-    vector<uint32_t> ids = decodificar(c, n, (uint32_t)M);
+    // Cada símbolo se escribe apenas se decodifica (los borrados quedan en cero)
     salida.assign(n * B, 0);
-    for (uint64_t i = 0; i < n; ++i)
-        if (ids[i] < M) memcpy(salida.data() + i * B, alfabeto + (uint64_t)ids[i] * B, B);
+    uint64_t i = 0;
+    decodificarCon(c, d.data() + pos, c.bitsCarga, n, (uint32_t)M, [&](uint32_t id) {
+        if (id < M) memcpy(salida.data() + i * B, alfabeto + (uint64_t)id * B, B);
+        ++i;
+    });
     salida.resize(min<uint64_t>(tamOriginal, salida.size()));
     return true;
 }

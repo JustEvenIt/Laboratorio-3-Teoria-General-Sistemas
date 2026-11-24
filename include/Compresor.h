@@ -2,6 +2,7 @@
 #define COMPRESOR_H
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 #include "ProcesadorFuente.h"
@@ -49,13 +50,19 @@ public:
     // Decodifica exactamente n símbolos. Los códigos inválidos (por errores del canal)
     // se convierten en el símbolo de borrado M, en lugar de detener el proceso.
     std::vector<uint32_t> decodificar(const Codificado& c, uint64_t n, uint32_t M);
+    // Igual, pero entrega cada símbolo a 'emitir' en orden, sin guardar la secuencia completa
+    // (con archivos grandes, la secuencia ocupa 4 bytes por símbolo). 'c' aporta el método y su tabla.
+    void decodificarCon(const Codificado& c, const uint8_t* carga, uint64_t bitsCarga, uint64_t n, uint32_t M,
+                        const std::function<void(uint32_t)>& emitir);
 
     // Archivo comprimido autocontenido: cabecera + alfabeto + tabla del código + carga
     uint64_t tamanoCabecera(const Codificado& c, const Fuente& f);
     std::vector<uint8_t> serializar(const Codificado& c, const Fuente& f);
     bool guardar(const std::string& ruta, const Codificado& c, const Fuente& f);
     // Reconstruye el contenido original usando sólo los bytes del formato comprimido
-    bool deserializar(const std::vector<uint8_t>& bytes, std::vector<unsigned char>& salida, std::string& error);
+    // 'maxSalida': tamaño máximo aceptado para el archivo original (protege de una cabecera dañada por el canal)
+    bool deserializar(const std::vector<uint8_t>& bytes, std::vector<unsigned char>& salida, std::string& error,
+                      uint64_t maxSalida = UINT64_MAX);
     bool descomprimirArchivo(const std::string& ruta, std::vector<unsigned char>& salida, std::string& error);
 };
 

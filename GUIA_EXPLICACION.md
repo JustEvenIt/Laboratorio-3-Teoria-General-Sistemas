@@ -23,7 +23,7 @@ El núcleo está escrito en C++ (por velocidad) y la interfaz en Python con Stre
 
 1. Abrir la app (`streamlit run app.py`) y entrar a `http://localhost:8501`.
 2. En la **barra lateral**:
-   - **Archivo**: uno de la carpeta `data/` (incluida `data/sin_comprimir/`) o uno propio con *Subir archivo*.
+   - **Archivo**: uno de los cuatro archivos grandes de `data/` (texto, audio, imagen y video) o uno propio con *Subir archivo*.
    - **Tamaño de símbolo N**: cuántos bits forman cada símbolo (de 8 a 32 768).
    - **Método**: Uniforme, Huffman, LZW o *Adaptable* (prueba los tres y se queda con el más pequeño).
    - **Probabilidad de error p**: ruido del canal (0 = canal perfecto).
@@ -56,8 +56,8 @@ medidas de Shannon.
 - **Entropía H(X) = −Σ P(x) log₂ P(x)**: la información promedio. Es el límite de Shannon para comprimir sin pérdida.
 - **Divergencia KL = N − H**: distancia a una fuente donde todos los símbolos son igual de probables. Es la redundancia.
 
-**Ejemplo.** `ejemplo_varianza_huffman.txt` con N = 8: cada símbolo ocupa 8 bits, pero H = 2.12 bits. Sobran casi 6 bits por
-símbolo.
+**Ejemplo.** `wikipedia_enwik9_550MB.txt` con N = 8: cada símbolo ocupa 8 bits, pero H = 5.14 bits (sólo aparecen 206 de los
+256 bytes posibles). Sobran casi 3 bits por símbolo.
 
 ### 2 · Codificación
 
@@ -69,7 +69,8 @@ media L̄, varianza σ², eficiencia H/L̄ y la desigualdad de Kraft.
 - **Huffman**: códigos cortos para los símbolos frecuentes. Su L̄ queda muy cerca de H.
 - **Varianza σ² = Σ P_k (L_k − L̄)²**: dos códigos pueden tener la misma longitud media y distinta varianza.
 
-**Ejemplo.** `ejemplo_varianza_huffman.txt` reproduce el ejemplo clásico, P = {0.4, 0.2, 0.2, 0.1, 0.1}:
+**Ejemplo.** El ejemplo clásico de cinco símbolos con P = {0.4, 0.2, 0.2, 0.1, 0.1} (un archivo de texto con esas frecuencias,
+subido con *Subir archivo*, lo reproduce):
 
 | Código | L̄ | σ² |
 |---|---|---|
@@ -89,7 +90,8 @@ paso del diccionario de LZW.
 - **LZW** guarda en un diccionario las secuencias que se repiten. Por eso gana cuando hay repeticiones, algo que Huffman no
   aprovecha porque trata cada símbolo como independiente.
 
-**Ejemplo.** `data_prueba_secuencial.txt` con N = 16: LZW deja el archivo en un tercio.
+**Ejemplo.** `wikipedia_enwik9_550MB.txt` con N = 8: Huffman bajaría a 5.14 bits por símbolo (la entropía), pero LZW gana
+porque guarda palabras enteras en su diccionario: el archivo pasa de 577 MB a 229 MB (60.4 % menos).
 
 ### 4 · Reconstrucción
 
@@ -143,23 +145,23 @@ Para cada una da los bits enviados, los errores que quedan y la **información m
 - "n y k solos no definen el código: lo define P. Con n y k el programa busca la P de mayor distancia mínima. Con (23,12)
   encuentra el código de Golay, que corrige 3 errores por bloque."
 
-**Ejemplo.** `don_quijote.txt`, N = 8, p = 0.001, Hamming (7,4):
+**Ejemplo.** `chopin_baladas_fantasia_allegro.wav` (744 MB), N = 8, Huffman, p = 0.001, Hamming (7,4):
 
 | | Bits enviados | Bits errados al final | Símbolos errados | I(X;Y) original ↔ recuperado |
 |---|---|---|---|---|
-| Sin control | 6 335 037 | 6 369 | 93.4 % | 0.003 de 4.527 bits |
-| FEC | 11 086 320 (+75 %) | 60 | 91.2 % | 0.017 bits |
-| ARQ | 11 164 517 (+76 %) | 0 | 0 % (archivo idéntico) | 4.527 bits |
+| Sin control | 5 414 554 894 | 5 415 527 | 98.0 % | 0.019 de 7.255 bits |
+| FEC | 9 475 471 068 (+75 %) | 48 749 | 97.7 % | 0.031 bits |
+| ARQ | 9 542 083 712 (+76 %) | 13 | 37.4 % | 3.709 bits |
 
-FEC quita el 99 % de los errores, pero con los 60 que quedan el 91 % de los símbolos ya no está en su posición: LZW corre el
-texto y repite los errores del diccionario. ARQ lo entrega idéntico con 11 171 retransmisiones. Los porcentajes se cuentan
-posición por posición; en una prueba con Huffman y 208 bits errados, el 95 % del texto reaparecía intacto, a lo sumo 5 bytes
-fuera de su lugar. Con **n = 5, k = 1** (repetición) FEC también lo deja idéntico, pero envía 5 veces más bits. Para contrastar:
-`sensores_trafico.csv` con método **Uniforme** pierde sólo el 0.6 % de los símbolos sin control, porque en un código de longitud
-fija cada error se queda en su propio símbolo.
+FEC quita el 99.1 % de los errores, pero con los 48 749 que quedan casi ningún símbolo queda en su posición: en Huffman un bit
+errado cambia la longitud de las palabras que siguen y corre el resto. ARQ deja sólo 13 bits errados de 5 400 millones; vienen
+de 9 bloques que recibieron 3 errores o más y se convirtieron en otra palabra del código, así que su síndrome dio cero (el
+Hamming (7,4) tiene d_min = 3 y sólo detecta con seguridad hasta 2 errores por bloque). Con esos pocos errores el 37 % de los
+símbolos queda fuera de su lugar, pero la información mutua sube a la mitad de H(X). Con **n = 5, k = 1** (repetición) o con
+un código de mayor distancia mínima los errores no detectados bajan aún más, a cambio de enviar más bits.
 
 La tabla **Teoría y medición** compara lo simulado con las fórmulas del código (por ejemplo, ARQ: 1.0070 envíos por bloque
-esperados y 1.0071 medidos).
+esperados y 1.0070 medidos con el archivo de Chopin).
 
 ### 7 · Comparar N
 
@@ -168,7 +170,8 @@ esperados y 1.0071 medidos).
 **Qué decir.** "Con N grande cada símbolo agrupa más bits y la entropía por bit baja. Pero aparecen muchos más símbolos distintos y
 hay que guardarlos en la cabecera. Por eso existe un N óptimo para cada archivo, y no siempre es 8."
 
-**Ejemplo.** `7341-minimalista.jpg`: el mejor es N = 256 con LZW.
+**Nota.** Con los archivos de 500 MB de `data/` el barrido procesa el archivo una vez por cada N, así que tarda varios
+minutos; con un archivo propio de pocos MB (*Subir archivo*) tarda segundos.
 
 ### 8 · Agente IA
 
@@ -211,37 +214,65 @@ Además muestra una **red 5G real** en la banda de 3.5 GHz (la más usada), calc
 
 ### 10 · Simulación 5G/6G
 
-**Qué muestra.** El archivo comprimido transmitido bit por bit por una capa física como la de 5G NR:
+**Qué muestra.** El archivo comprimido, cifrado y transmitido bloque por bloque y bit por bit por una capa física como la de
+5G NR:
 
 ```
-bloques de transporte → CRC → código de canal → adaptación de tasa → QPSK…1024QAM → canal con ruido → LLR
-→ decodificación → CRC → HARQ → descompresión → archivo recuperado
+cifrado AES-128 → bloques de transporte → CRC → código de canal → adaptación de tasa → QPSK…1024QAM → capas MIMO
+→ canal con ruido → confianza de cada bit (LLR) → decodificación → CRC → HARQ → descifrado → descompresión → archivo
 ```
 
 Con el mismo canal compara tres caminos: el **LDPC de 5G** (TS 38.212), el **código de bloque** de la barra lateral y **sin
-código**. Se eligen el escenario (5G eMBB, 5G URLLC o 6G candidato), la relación señal a ruido y los envíos máximos (ARQ), y
-se pulsa **Simular**. Muestra la velocidad, la latencia, la BLER, la información mutua original ↔ recuperado,
-la constelación recibida, la comparación con los requisitos de la UIT y, con **Calcular curvas**, la BLER frente a la SNR de
-cada código con su límite de Shannon.
+código**. Se eligen el escenario (5G eMBB, 5G URLLC o 6G candidato), la relación señal a ruido, las **capas MIMO** (1, 2, 4, 8 o
+«que decida el agente»), si se cifra y si se envía el archivo completo o sus primeros 4 MB; los envíos máximos por bloque son
+los del control **ARQ** de la barra lateral (hasta 8). **Simular** corre en segundo plano con una barra de avance y el tiempo que
+falta. Los resultados quedan en sub-pestañas:
+
+- **Resumen**: velocidad, latencia, BLER, si el archivo llegó idéntico, la tabla de los tres códigos y los requisitos de la UIT.
+- **Paso a paso**: lo que le pasa al primer bloque en cada etapa, con sus números reales (bits, CRC, partes del LDPC, símbolos
+  por capa, errores, iteraciones, ACK/NACK, latencia, descifrado y descompresión). Se puede ver para cada código.
+- **Capas MIMO**: qué son, la capacidad L·log₂(1 + SNR/L) para 1, 2, 4 y 8 capas y los errores de cada capa.
+- **Agente**: sólo pruebas. La medición de las 12 opciones (código × capas) con los mismos bloques, la opción del agente
+  marcada, y cada prueba que hizo el agente (al azar o la mejor conocida).
+- **Constelación**: los símbolos recibidos sobre los puntos ideales y cómo leer la imagen.
+- **Curvas BLER** y **Confiabilidad** (300 000 mensajes de 32 bytes).
+
+El botón **Visualizar** abre una figura animada: un banco de pruebas con 11 estaciones numeradas donde cada bloque sale del
+archivo, se cifra, recibe su CRC, se codifica, se modula, se reparte entre las antenas de sus capas, cruza el aire (las cuentas
+rojas son símbolos que el ruido acercó a otro punto) y en el receptor se combina, se decodifica (la aguja marca las
+iteraciones), se revisa el CRC (luz ACK o NACK; el aviso vuelve por el cable de atrás) y, si falla, se envía otra vez.
 
 **Qué decir.**
 - "Esto ya no es una fórmula: cada bit del archivo pasa por la cadena de la norma y se cuenta lo que llega."
+- "Primero se comprime, después se cifra y al final se protege. El cifrado es AES-128 en modo contador, el de 5G: genera un
+  flujo de clave y lo suma con XOR, así que un bit errado en el canal daña sólo ese bit al descifrar."
+- "Con varias antenas se mandan varias capas a la vez. La potencia se reparte: con L capas cada una llega con SNR/L. Más capas
+  dan más símbolos por segundo, pero cada uno con más ruido; el agente prueba cuántas conviene."
 - "El LDPC de 5G es un código de bloque lineal como los de la pestaña 6, pero con miles de bits y una matriz H dispersa. Se
-  decodifica con información blanda (LLR) y queda a 1–2 dB del límite de Shannon."
+  decodifica con la confianza de cada bit y queda a 1–2 dB del límite de Shannon."
 - "HARQ junta lo que llegó en cada envío; por eso un bloque que falla la primera vez casi siempre pasa la segunda."
 - "La modulación y la tasa se ajustan solas: con cada bloque que falla se usa una más robusta y con cada acierto se sube un
   poco, hasta fallar alrededor del 10 % de las veces."
 - "Después de decidir cada bit, este canal se comporta como el canal binario simétrico de la pestaña 5: la columna 'p del canal'
   es su p."
 
-**Ejemplo.** `don_quijote.txt` (773 KB comprimido):
+**Ejemplo.** `nasa_blue_marble_21600x10800.bmp`, comprimido con Huffman (N = 8) a 608 MB, cifrado, Hamming (7,4) en la barra
+lateral. Con los primeros 4 MB y «que decida el agente»:
 
-| Escenario | LDPC de 5G | Hamming (7,4) | Sin código |
-|---|---|---|---|
-| 5G eMBB, 20 dB (256QAM, p = 6.6 %) | 285 Mbit/s, latencia media 0.78 ms, idéntico | no llega | no llega |
-| 5G eMBB, 8 dB (16QAM, p = 9.8 %) | 116 Mbit/s, idéntico | no llega | no llega |
-| 5G URLLC, 10 dB (16QAM) | 125 Mbit/s, 0.25 ms, idéntico | pierde el 51 % de los bloques | no llega |
-| 6G candidato, 30 dB (1024QAM, p = 1.7 %) | 1.75 Gbit/s, 0.1 ms, idéntico | 394 Mbit/s con varios envíos, idéntico | no llega |
+| Escenario y SNR | El agente elige | SNR por capa | LDPC de 5G | Hamming (7,4) y sin código |
+|---|---|---|---|---|
+| 5G eMBB, 20 dB | LDPC · 8 capas | 11.0 dB (64QAM) | 1.19 Gbit/s, latencia media 0.73 ms | no llegan |
+| 5G eMBB, 0 dB | LDPC · 2 capas | −3.0 dB (QPSK) | 42.5 Mbit/s, latencia media 0.70 ms | no llegan |
+| 5G URLLC, 10 dB | LDPC · 8 capas | 1.0 dB (QPSK) | 269 Mbit/s, 0.25 ms sin repeticiones | no llegan |
+| 6G candidato, 30 dB | LDPC · 8 capas | 21.0 dB (256QAM) | 8.97 Gbit/s, latencia media 0.09 ms | no llegan |
+
+En los cuatro casos la opción del agente es la mejor de la medición de las 12 opciones. A 0 dB el agente no usa 8 capas: cada
+una quedaría en −9 dB, por debajo de la modulación más robusta, y ningún bloque llegaría; con 2 capas entrega 44 Mbit/s frente a
+33 con 1 capa y 27 con 4.
+
+**Archivo completo** (608 MB, eMBB a 20 dB, 8 capas): 10 126 bloques, 11 140 envíos, ninguno con error al final; 1.30 Gbit/s,
+latencia media 0.70 ms y máxima 2.5 ms; el BMP descifrado y descomprimido es **idéntico** al original (comparado byte a byte).
+Tardó 26 minutos y usó 2.5 GB de memoria.
 
 En las curvas con QPSK y la misma tasa 4/7, el LDPC llega a BLER = 10 % cerca de 2 dB y el Hamming (7,4) cerca de 9 dB: unos
 **7 dB de ganancia de codificación**. En URLLC a 10 dB, 300 000 paquetes de 32 bytes llegaron sin ninguna falla dentro de 1 ms:
@@ -253,51 +284,50 @@ Muestra la salida del núcleo C++ y el tiempo de cada etapa. Sirve para demostra
 
 ## 5. Archivos de prueba
 
-La carpeta `data/sin_comprimir/` tiene archivos **sin comprimir**, pensados para ver el efecto de la compresión. Todos son
-sintéticos (generados para el proyecto), salvo *Don Quijote*, que es de dominio público (Project Gutenberg).
+La carpeta `data/` tiene cuatro archivos reales de más de 500 MB, uno de cada tipo de fuente. Resultados con N = 8 y el método
+adaptable (el programa prueba Uniforme, Huffman y LZW y guarda el más pequeño):
 
-Resultados del agente y del envío por 5G y 6G (tiempo sin comprimir → comprimido, incluida la demora de la red):
-
-| Archivo | Qué es | Tamaño | Agente elige | Comprimido | Ahorro | 5G garantizada (100 Mbit/s) | Red 5G real (3.5 GHz) | 6G garantizada |
-|---|---|---|---|---|---|---|---|---|
-| `don_quijote.txt` | Libro completo | 2 174 KB | LZW, N = 8 | 773 KB | 64.4 % | 182 → 67 ms | 18.0 → 9.5 ms | 48.0 → 17.4 ms |
-| `sensores_trafico.csv` | Datos de sensores de una intersección | 1 472 KB | LZW, N = 16 | 204 KB | 86.2 % | 125 → 21 ms | 13.4 → 5.0 ms | 32.7 → 5.0 ms |
-| `registro_servidor.log` | Registro de un servidor web | 1 465 KB | LZW, N = 16 | 157 KB | 89.3 % | 124 → 17 ms | 13.4 → 5.0 ms | 32.6 → 4.0 ms |
-| `alertas_trafico.json` | Alertas de incidentes | 1 048 KB | LZW, N = 16 | 67 KB | 93.6 % | 90 → 9.5 ms | 10.5 → 4.5 ms | 23.4 → 2.0 ms |
-| `mapa_interseccion.bmp` | Imagen con colores planos | 2 197 KB | LZW, N = 64 | 18 KB | **99.2 %** | 184 → 5.4 ms | 18.4 → 4.5 ms | 48.6 → 0.9 ms |
-| `degradado_colores.bmp` | Imagen con degradados suaves | 2 304 KB | LZW, N = 16 | 1 733 KB | 24.8 % | 193 → 146 ms | 19.5 → 15.5 ms | 50.9 → 38.4 ms |
-| `foto_con_ruido.bmp` | Imagen con ruido de cámara | 1 406 KB | Huffman, N = 8 | 1 358 KB | **3.4 %** | 119 → 115 ms | 13.0 → 13.0 ms | 31.3 → 30.2 ms |
-| `sirena_ambulancia.wav` | Audio de una sirena | 689 KB | LZW, N = 128 | 219 KB | 68.2 % | 60 → 22 ms | 8.4 → 5.5 ms | 15.6 → 5.3 ms |
-| `tono_puro_440hz.wav` | Audio de una nota pura | 431 KB | LZW, N = 64 | 41 KB | 90.4 % | 39 → 7.4 ms | 7.0 → 4.5 ms | 10.0 → 1.4 ms |
-| `telemetria_magnetometro.bin` | Muestras de un sensor | 977 KB | LZW, N = 16 | 477 KB | 51.2 % | 84 → 43 ms | 10.5 → 7.0 ms | 21.9 → 11.0 ms |
-| `Captura de pantalla 2025-03-16 121948.bmp` | Captura de pantalla | 5 590 KB | LZW, N = 8 | 2 778 KB | 50.3 % | 462 → 232 ms | 40.9 → 22.5 ms | 123 → 61 ms |
-
-Para 6G se usa el valor medio de su rango.
+| Archivo | Qué es | Tamaño | Elige | Comprimido | Ahorro | Procesar (p = 0) |
+|---|---|---|---|---|---|---|
+| `wikipedia_enwik9_550MB.txt` | Texto de Wikipedia (volcado enwik9) | 577 MB | LZW | 229 MB | **60.4 %** | 73 s |
+| `chopin_baladas_fantasia_allegro.wav` | Audio sin comprimir (PCM) | 744 MB | Huffman | 677 MB | 9.1 % | 113 s |
+| `nasa_blue_marble_21600x10800.bmp` | Imagen de la Tierra de la NASA, sin comprimir | 700 MB | Huffman | 608 MB | 13.1 % | 77 s |
+| `tears_of_steel_1080p.webm` | Video ya comprimido (VP9) | 571 MB | Uniforme | 571 MB | **0 %** | 88 s |
 
 **Lo que muestran juntos:**
-- **Texto y datos** (libro, CSV, registro, JSON) se comprimen mucho: tienen palabras y estructuras que se repiten.
-- **Colores planos** (`mapa_interseccion.bmp`) se reducen casi por completo; **ruido** (`foto_con_ruido.bmp`) casi no se reduce:
-  el ruido es información que no se repite, su entropía es casi la máxima.
-- **El mismo contenido comprimido y sin comprimir**: la captura de pantalla en PNG (en `data/`) no baja nada porque el formato PNG
-  ya está comprimido; la misma captura en BMP baja a la mitad. Lo mismo pasa con MP3, JPG y ZIP.
+- **El texto** se comprime mucho: tiene palabras y estructuras que se repiten, y LZW las guarda en su diccionario.
+- **El audio y la imagen sin comprimir** bajan poco con N = 8: así sólo se aprovecha que unos bytes son más comunes que otros, y
+  su entropía ya es alta (7.25 bits por byte en el audio y 6.92 en la imagen, de un máximo de 8). Huffman llega casi a ese
+  límite: 9.1 % y 13.1 % de ahorro. Los parecidos entre bytes vecinos (una muestra de audio se parece a la anterior) no se
+  aprovechan con símbolos sueltos.
+- **El video ya comprimido** no baja nada: su entropía es 7.9999 bits por byte, prácticamente la máxima, porque el formato VP9
+  ya quitó la redundancia. El programa guarda el código uniforme y el archivo queda igual (más 299 bytes de cabecera).
+- Con archivos de este tamaño cada etapa tarda: procesar uno toma entre 1 y 2 minutos, y la simulación 5G/6G del archivo completo
+  unos 26 minutos (por eso, sin marcar «Archivo completo», se envían los primeros 4 MB).
 
-## 6. Orden sugerido para la demostración (unos 17 minutos)
+## 6. Orden sugerido para la demostración (unos 20 minutos)
+
+Antes de empezar, procesar los archivos que se van a mostrar (cada uno tarda entre 1 y 2 minutos; los resultados quedan
+guardados mientras la página siga abierta). La simulación del archivo completo de nasa_blue ya queda guardada y se muestra al
+abrir la pestaña 10 sin repetirla.
 
 1. **Introducción** (1 min): la frase de la sección 1 y el recorrido Fuente → … → Reconstrucción.
-2. **Fuente** con `ejemplo_varianza_huffman.txt` (2 min): H = 2.12 frente a 8 bits.
-3. **Codificación** con el mismo archivo (2 min): varianza 0.16 frente a 1.36.
-4. **Compresión y reconstrucción** con `data_prueba_secuencial.txt`, N = 16 (1.5 min): LZW y reconstrucción idéntica.
+2. **Fuente** con `wikipedia_enwik9_550MB.txt` (2 min): H = 5.14 frente a 8 bits.
+3. **Codificación** (2 min): Uniforme frente a Huffman, longitud media y varianza.
+4. **Compresión y reconstrucción** con el mismo archivo (1.5 min): LZW lo deja en 229 MB y la reconstrucción es idéntica.
 5. **Canal** con p = 0.01 (1.5 min): matriz de transición, I(X;Y) y capacidad. Mostrar al final la calculadora del canal discreto.
-6. **Control de error** con `don_quijote.txt` y p = 0.001 (2 min): matrices G y H, tabla de síndromes, un bloque corregido y la
-   comparación sin control / FEC / ARQ. Volver p a 0.
-7. **Contraste** entre `mapa_interseccion.bmp` (99 %) y `foto_con_ruido.bmp` (3 %) (1 min).
-8. **Agente IA** con `sensores_trafico.csv` (2 min): decisión, gráfica por bloques, mapa de las 27 combinaciones.
-9. **5G / 6G** con la captura en BMP (1 min): la red 5G real pasa de 41 ms a 22.5 ms.
-10. **Simulación 5G/6G** con `don_quijote.txt` (3 min): eMBB a 20 dB (LDPC idéntico, Hamming no llega), la constelación, las
-    curvas BLER y el escenario 6G a 30 dB.
+6. **Control de error** con `chopin_baladas_fantasia_allegro.wav` y p = 0.001 (2 min): matrices G y H, tabla de síndromes, un
+   bloque corregido y la comparación sin control / FEC / ARQ. Volver p a 0.
+7. **Contraste** entre el texto (60 % de ahorro) y el video ya comprimido (0 %) (1 min).
+8. **Agente IA** (2 min): decisión, gráfica por bloques, mapa de las combinaciones.
+9. **5G / 6G** (1 min): cuánto tarda el archivo comprimido frente al original.
+10. **Simulación 5G/6G** con `nasa_blue_marble_21600x10800.bmp` (4 min): el resultado guardado del archivo completo (idéntico,
+    1.30 Gbit/s), el **Paso a paso**, las **Capas MIMO**, el **Agente** (sus pruebas), la **Constelación** y el botón
+    **Visualizar**. Después, una simulación de 4 MB a 0 dB para ver que el agente cambia a 2 capas.
 11. **Cierre** (30 s): entropía = límite de la compresión, varianza = criterio entre códigos igual de eficientes, información
-    mutua = lo que sobrevive al canal, control de error = redundancia que se agrega a propósito, agente = decide solo, 5G/6G =
-    menos bits, menos tiempo, y un buen código de canal llega cerca del límite de Shannon.
+    mutua = lo que sobrevive al canal, control de error = redundancia que se agrega a propósito, cifrado = privacidad sin
+    agregar bits, capas MIMO = más símbolos a la vez repartiendo la potencia, agente = decide solo y con pruebas, y un buen
+    código de canal llega cerca del límite de Shannon.
 
 ## 7. Preguntas frecuentes
 
@@ -334,7 +364,8 @@ Para 6G se usa el valor medio de su rango.
   protocolos de red.
 - Los valores de **6G** son objetivos de investigación de la UIT, no una norma técnica terminada.
 - Los tiempos incluyen la demora fija de la red (4 ms en 5G; 0.1 a 1 ms en 6G).
-- En la **simulación 5G/6G** el canal sólo suma ruido gaussiano (AWGN), hay una sola antena, el receptor no tiene que estimar el
+- En la **simulación 5G/6G** el canal sólo suma ruido gaussiano (AWGN); las capas MIMO llegan separadas, sin interferencia entre
+  ellas, y se reparten la potencia por igual (cada una con SNR/L); el receptor no tiene que estimar el
   canal, no hay cabeceras de protocolo y un bloque se repite 4 envíos después. La latencia cuenta el tiempo de los envíos y las
   esperas entre repeticiones.
 - El **escenario 6G** usa valores candidatos (400 MHz, envíos de 62.5 µs, hasta 1024QAM) con el LDPC de 5G: no hay norma de 6G.

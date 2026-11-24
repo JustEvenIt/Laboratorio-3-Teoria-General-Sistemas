@@ -38,6 +38,22 @@ struct MetricasMutua {
     double tasaErrorSimbolo = 0;
 };
 
+// Acumula los pares (x, y) uno por uno y al final da H(Y), H(X,Y) e I(X;Y) = H(X) + H(Y) - H(X,Y).
+// Con alfabetos pequeños usa la matriz conjunta completa; si no, la diagonal más una lista de los pares distintos.
+class AcumuladorMutua {
+public:
+    AcumuladorMutua(const std::vector<uint64_t>& frecuenciasX, double HX);
+    void agregar(uint32_t x, uint32_t y);
+    MetricasMutua resultado();
+
+private:
+    size_t M;
+    double HX;
+    uint64_t n = 0, errores = 0;
+    bool completa;
+    std::vector<uint64_t> frecY, conjunta, diagonal, fueraDiagonal;
+};
+
 class Sistema {
 public:
     static MetricasFuente analizarFuente(const Fuente& f, const std::vector<double>& P);

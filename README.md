@@ -3,7 +3,7 @@
 Este repositorio contiene un sistema desarrollado en C++ diseñado para fragmentar, analizar estadísticamente, comprimir y reconstruir grandes volúmenes de datos (audio, video, texto, imagen). El proyecto está orientado a simular las necesidades de procesamiento masivo en redes de telecomunicaciones modernas (5G y 6G), soportando un tamaño de símbolo adaptable desde 8 hasta 32768 bits.
 
 La guía [GUIA_EXPLICACION.md](GUIA_EXPLICACION.md) explica cada parte del programa para presentarlo, con resultados de los
-archivos de prueba sin comprimir de `data/sin_comprimir/`.
+archivos de prueba de `data/`.
 
 ## Arquitectura del Proyecto
 
@@ -11,7 +11,14 @@ El código fuente está estructurado siguiendo las mejores prácticas de C++, se
 
 - **`include/`**: Contiene los archivos de cabecera (`.h`) con las definiciones y contratos de las clases.
 - **`src/`**: Aloja los archivos de código fuente (`.cpp`) donde reside la lógica algorítmica y matemática.
-- **`data/`**: Archivos de prueba. Las salidas de cada ejecución van a `data/salida/` (ignorada en git).
+- **`data/`**: Archivos de prueba grandes (más de 500 MB cada uno): texto (`wikipedia_enwik9_550MB.txt`, el volcado enwik9 de
+  Wikipedia), audio (`chopin_baladas_fantasia_allegro.wav`), imagen (`nasa_blue_marble_21600x10800.bmp`, la Blue Marble de la
+  NASA) y video (`tears_of_steel_1080p.webm`). Las salidas de cada ejecución van a `data/salida/` (ignorada en git).
+  Por su tamaño no están en el repositorio. Se obtienen de: enwik9 en http://mattmahoney.net/dc/enwik9.zip; grabaciones de
+  Chopin de dominio público de Musopen en https://archive.org/details/musopen-chopin (convertidas a WAV); la Blue Marble de
+  21600 × 10800 de NASA Visible Earth en https://visibleearth.nasa.gov (convertida a BMP); y *Tears of Steel* en
+  https://download.blender.org/demo/movies/ToS/tears_of_steel_1080p.webm.
+- **`visual/`**: La figura animada del botón **Visualizar** (`viaje.html`), generada con `node visual/build.mjs`.
 - **`app.py`**: Interfaz web en Streamlit que muestra cada etapa del proceso con sus métricas e interpretación.
 
 ## Módulos Principales
@@ -93,14 +100,24 @@ El cálculo del TBS y de la segmentación se verificó contra una segunda implem
 
 ## Simulación 5G / 6G bit por bit
 
-La pestaña **10 · Simulación 5G/6G** transmite el archivo comprimido por una capa física como la de 5G NR, bit por bit, y
-compara tres caminos con el mismo canal: el **LDPC de 5G**, el **código de bloque** del control de error y **sin código**.
+La pestaña **10 · Simulación 5G/6G** cifra el archivo comprimido y lo transmite por una capa física como la de 5G NR, bloque
+por bloque y bit por bit, y compara tres caminos con el mismo canal: el **LDPC de 5G**, el **código de bloque** del control de
+error y **sin código**. Un **agente** elige el código y las capas MIMO antes de enviar.
 
 ```
-archivo comprimido → bloques de transporte → CRC24A/CRC16 + segmentación + CRC24B → código de canal
-→ adaptación de tasa (rv 0, 2, 3, 1) + entrelazado → QPSK…1024QAM → canal con ruido gaussiano (AWGN) → LLR
-→ decodificación → CRC → HARQ (hasta 4 envíos) → descompresión → archivo recuperado
+archivo comprimido → cifrado AES-128-CTR → bloques de transporte → CRC24A/CRC16 + segmentación + CRC24B → código de canal
+→ adaptación de tasa (rv 0, 2, 3, 1) + entrelazado → QPSK…1024QAM → capas MIMO (1, 2, 4 u 8) → canal con ruido gaussiano
+→ LLR → decodificación → CRC → HARQ (envíos máximos: el control ARQ, hasta 8) → descifrado → descompresión → archivo recuperado
 ```
+
+Los tres caminos usan **un solo lazo de retransmisión** (`enviarTB` en `src/Simulacion.cpp`): cada código sólo dice cómo
+codifica, qué bits salen en cada envío y cómo combina y decodifica (redundancia incremental en el LDPC, combinación de Chase
+en el código de bloque y sin código).
+
+La pestaña tiene sub-pestañas: **Resumen**, **Paso a paso** (el primer bloque con los números reales de cada etapa),
+**Capas MIMO**, **Agente** (sólo pruebas: medición de las 12 opciones y lo que probó el agente), **Constelación** (con cómo
+leerla), **Curvas BLER** y **Confiabilidad**. El botón **Visualizar** abre una figura animada donde cada bloque recorre el
+transmisor, cruza el aire por sus capas y llega al receptor, con sus errores, iteraciones y ACK/NACK reales.
 
 | Parte | Referencia | Archivo |
 |---|---|---|
@@ -110,10 +127,23 @@ archivo comprimido → bloques de transporte → CRC24A/CRC16 + segmentación + 
 | Modulación QPSK, 16QAM, 64QAM, 256QAM y 1024QAM | TS 38.211 §5.1 | `src/NR.cpp` |
 | Tablas MCS 1 a 4 (incluida la de baja eficiencia para URLLC y la de 1024QAM) y TBS | TS 38.214 §5.1.3 | `src/NR.cpp`, `src/Enlace.cpp` |
 | Decodificador LDPC min-sum normalizado (fila por fila), HARQ con redundancia incremental, ajuste automático de modulación y tasa | — | `src/NR.cpp`, `src/Simulacion.cpp` |
+| Mapeo a capas: la capa l lleva los símbolos l, l + L, …; hasta 4 capas por palabra de código | TS 38.211 §7.3.1.3 | `src/Simulacion.cpp` |
+| Cifrado AES-128 en modo contador (bloque contador de 128-NEA2) | FIPS-197, NIST SP 800-38A, TS 33.501 | `src/Cifrado.cpp` |
 
-Escenarios, todos con una sola antena y canal AWGN: **5G eMBB** (banda n78, 100 MHz, envíos de 0.5 ms, hasta 256QAM), **5G
+Escenarios, con canal AWGN: **5G eMBB** (banda n78, 100 MHz, envíos de 0.5 ms, hasta 256QAM), **5G
 URLLC** (n78, envíos de 0.25 ms, modulación y tasa más robustas) y **6G candidato** (400 MHz, envíos de 62.5 µs, hasta
-1024QAM). La modulación y la tasa del código se eligen solas según la SNR y se ajustan con cada bloque que falla o llega bien. Los resultados se comparan con los requisitos de IMT-2020 (ITU-R M.2410) y de IMT-2030 (ITU-R M.2160); la
+1024QAM). Con L capas MIMO la potencia se reparte por igual, así que cada capa llega con SNR/L; las capas llegan separadas, sin
+interferencia entre ellas. La modulación y la tasa del código se eligen solas según la SNR por capa y se ajustan con cada
+bloque que falla o llega bien.
+
+**Agente de transmisión.** Con «Capas MIMO: que decida el agente», antes de enviar el archivo el agente prueba las 12 opciones
+(LDPC, código de bloque y sin código, cada uno con 1, 2, 4 y 8 capas) bloque por bloque con la regla ε-greedy (recompensa: bits
+entregados dentro del plazo de latencia por segundo) y elige la mejor. Después se miden todas las opciones con los mismos
+8 bloques y el mismo canal para comprobar la decisión.
+
+**Archivos grandes.** La simulación guarda 8 bits en cada byte (antes usaba un byte entero por cada bit), decodifica
+en paralelo con todos los núcleos y corre en segundo plano con una barra de avance. Un archivo de 600 MB necesita unos 2,5 GB de
+memoria. Los resultados se comparan con los requisitos de IMT-2020 (ITU-R M.2410) y de IMT-2030 (ITU-R M.2160); la
 prueba de confiabilidad envía paquetes de 32 bytes dentro del plazo y da la cota de Clopper-Pearson al 95 %. También calcula
 las curvas BLER frente a SNR de los cuatro códigos con su límite de Shannon.
 
@@ -125,6 +155,8 @@ Verificación:
 - La fórmula de 1024QAM y las tablas MCS se leyeron de TS 38.211 V17.6.0 y TS 38.214 V17.8.0.
 - El decodificador queda a 1–2.5 dB del límite de Shannon (por ejemplo, QPSK con tasa 1/2 y K = 8448 decodifica desde
   Es/N0 ≈ 1.1 dB, con el límite en 0 dB).
+- El AES da el vector de prueba de FIPS-197 (apéndice C.1) y el de modo contador de NIST SP 800-38A (F.5.1); cifrar con hilos y
+  sin hilos da lo mismo, y descifrar es volver a cifrar.
 
 ## Compilación y Ejecución
 
@@ -143,7 +175,7 @@ archivo**). El agente (pestaña 8) se ejecuta con su botón; la pestaña 5G/6G s
 La interfaz compila el núcleo automáticamente con `g++` si el ejecutable no existe o si cambió el código. Para compilarlo a mano:
 
 ```bash
-g++ -O2 -std=c++17 src/*.cpp -o codificador_6g.exe
+g++ -O3 -std=c++17 -pthread src/*.cpp -o codificador_6g.exe
 ```
 
 Uso desde la terminal:
@@ -155,12 +187,12 @@ Uso desde la terminal:
 ./codificador_6g.exe data/archivo.mp3 --barrido 8,16,32,64,128,256,512,1024,2048 --json barrido.json
 ./codificador_6g.exe data/archivo.mp3 --agente --salida data/salida/agente --json agente.json
 ./codificador_6g.exe data/archivo.mp3 --enlace --comprimido data/salida/agente/agente.ti6g --snr 20 --capas 4 --servicio embb --json enlace.json
-./codificador_6g.exe data/archivo.txt --simular --comprimido data/salida/prueba/comprimido.ti6g --escenario embb --canal awgn --snr 20 --fec 7,4 --json sim.json
-./codificador_6g.exe data/archivo.txt --simular --comprimido data/salida/prueba/comprimido.ti6g --escenario urllc --snr 10 --paquetes 300000 --json sim.json
+./codificador_6g.exe data/archivo.txt --simular --comprimido data/salida/prueba/comprimido.ti6g --escenario embb --snr 20 --capas auto --fec 7,4 --json sim.json
+./codificador_6g.exe data/archivo.txt --simular --comprimido data/salida/prueba/comprimido.ti6g --escenario 6g --snr 30 --capas 4 --sin-cifrado --max-bytes 4194304 --json sim.json
+./codificador_6g.exe --confiabilidad --escenario urllc --snr 10 --paquetes 300000 --json confiabilidad.json
 ./codificador_6g.exe --curvas --escenario embb --snr 3 --fec 7,4 --json curvas.json
 ```
 
-`data/ejemplo_varianza_huffman.txt` reproduce el ejemplo clásico $P = \{0.4, 0.2, 0.2, 0.1, 0.1\}$. Las dos variantes de Huffman tienen el mismo $\bar L = 2.2$, pero $\sigma^2 = 0.16$ frente a $1.36$.
 
 # Enunciado codificación, decodificación, compresión adaptable 5G y 6G
 

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include "../include/Enlace.h"
 #include "../include/GrafosBaseNR.h"
@@ -84,6 +85,8 @@ int indiceConjunto(int Zc) {
 
 const LDPC& LDPC::obtener(int grafo, int Zc) {
     static map<pair<int, int>, unique_ptr<LDPC>> cache;
+    static mutex candado;  // la simulación decodifica en varios hilos
+    lock_guard<mutex> bloqueo(candado);
     auto& c = cache[{grafo, Zc}];
     if (!c) {
         c.reset(new LDPC());
@@ -312,11 +315,11 @@ void recuperarTasa(const float* f, int E, int k0, int Qm, const uint8_t* d, int 
 // ======================= Modulación (TS 38.211 §5.1) =======================
 
 // Niveles de un eje con m bits: A = (1-2a0)[2^(m-1) - (1-2a1)[2^(m-2) - ... [2 - (1-2a_(m-1))]]], normalizados
-static const vector<float>& niveles(int m) {
-    static vector<float> tabla[6];
-    if (tabla[m].empty()) {
+static vector<float> calcularNiveles(int m) {
+    vector<float> nivel;
+    if (m >= 1) {
         const float escala = 1.0f / sqrtf(2.0f * ((1 << (2 * m)) - 1) / 3.0f);
-        tabla[m].resize(1 << m);
+        nivel.resize(1 << m);
         for (int p = 0; p < (1 << m); ++p) {
             auto a = [&](int k) { return 1 - 2 * ((p >> (m - 1 - k)) & 1); };
             int t = 1;
@@ -324,9 +327,16 @@ static const vector<float>& niveles(int m) {
                 t = 2 - a(m - 1);
                 for (int k = m - 2; k >= 1; --k) t = (1 << (m - k)) - a(k) * t;
             }
-            tabla[m][p] = a(0) * t * escala;
+            nivel[p] = a(0) * t * escala;
         }
     }
+    return nivel;
+}
+
+// Se calculan una sola vez al iniciar (seguro con varios hilos)
+static const vector<float>& niveles(int m) {
+    static const vector<float> tabla[6] = {calcularNiveles(0), calcularNiveles(1), calcularNiveles(2),
+                                           calcularNiveles(3), calcularNiveles(4), calcularNiveles(5)};
     return tabla[m];
 }
 

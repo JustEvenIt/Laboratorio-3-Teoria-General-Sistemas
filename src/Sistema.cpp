@@ -55,52 +55,52 @@ static double entropiaDeConteos(const vector<uint64_t>& conteos, double total) {
     return H;
 }
 
-MetricasMutua Sistema::informacionMutua(const vector<uint32_t>& X, const vector<uint32_t>& Y,
-                                        const vector<uint64_t>& frecuenciasX, double HX) {
+AcumuladorMutua::AcumuladorMutua(const vector<uint64_t>& frecuenciasX, double HX)
+    : M(frecuenciasX.size()), HX(HX), completa((uint64_t)frecuenciasX.size() * (frecuenciasX.size() + 1) <= (1ULL << 24)) {
+    frecY.assign(M + 1, 0);  // P(y) incluye el símbolo de borrado (índice M)
+    if (completa) conjunta.assign(M * (M + 1), 0);
+    else diagonal = frecuenciasX;
+}
+
+void AcumuladorMutua::agregar(uint32_t x, uint32_t y) {
+    ++n;
+    frecY[y]++;
+    if (x != y) errores++;
+    if (completa) conjunta[(size_t)x * (M + 1) + y]++;
+    else if (x != y) {
+        diagonal[x]--;
+        fueraDiagonal.push_back(((uint64_t)x << 32) | y);
+    }
+}
+
+MetricasMutua AcumuladorMutua::resultado() {
     MetricasMutua m;
-    const size_t M = frecuenciasX.size();
-    const double n = (double)X.size();
     m.HX = HX;
-    if (X.empty()) return m;
-
-    // P(y) incluye el símbolo de borrado (índice M)
-    vector<uint64_t> frecY(M + 1, 0);
-    for (uint32_t y : Y) frecY[y]++;
-    m.HY = entropiaDeConteos(frecY, n);
-
-    // P(x,y): con alfabetos pequeños se usa la matriz completa M x (M+1);
-    // si no, la diagonal (x,x) más una tabla sólo para los errores
-    if ((uint64_t)M * (M + 1) <= (1ULL << 24)) {
-        vector<uint64_t> conjunta((size_t)M * (M + 1), 0);
-        for (size_t i = 0; i < X.size(); ++i) {
-            conjunta[(size_t)X[i] * (M + 1) + Y[i]]++;
-            if (X[i] != Y[i]) m.errores++;
-        }
-        m.HXY = entropiaDeConteos(conjunta, n);
-    } else {
-        vector<uint64_t> diagonal(frecuenciasX);
-        vector<uint64_t> fueraDiagonal;  // pares (x,y) con x != y; se ordenan para contarlos
-        for (size_t i = 0; i < X.size(); ++i) {
-            if (X[i] != Y[i]) {
-                diagonal[X[i]]--;
-                fueraDiagonal.push_back(((uint64_t)X[i] << 32) | Y[i]);
-            }
-        }
-        m.errores = fueraDiagonal.size();
-        m.HXY = entropiaDeConteos(diagonal, n);
+    if (n == 0) return m;
+    const double total = (double)n;
+    m.HY = entropiaDeConteos(frecY, total);
+    if (completa) m.HXY = entropiaDeConteos(conjunta, total);
+    else {
+        m.HXY = entropiaDeConteos(diagonal, total);
         sort(fueraDiagonal.begin(), fueraDiagonal.end());
         for (size_t i = 0; i < fueraDiagonal.size();) {
             size_t j = i;
             while (j < fueraDiagonal.size() && fueraDiagonal[j] == fueraDiagonal[i]) ++j;
-            double q = (j - i) / n;
+            double q = (j - i) / total;
             m.HXY -= q * log2(q);
             i = j;
         }
     }
-
-    // I(X;Y) = H(X) + H(Y) - H(X,Y)
+    m.errores = errores;
     m.IXY = max(0.0, m.HX + m.HY - m.HXY);
     m.HXdadoY = max(0.0, m.HX - m.IXY);
-    m.tasaErrorSimbolo = m.errores / n;
+    m.tasaErrorSimbolo = errores / total;
     return m;
+}
+
+MetricasMutua Sistema::informacionMutua(const vector<uint32_t>& X, const vector<uint32_t>& Y,
+                                        const vector<uint64_t>& frecuenciasX, double HX) {
+    AcumuladorMutua acumulador(frecuenciasX, HX);
+    for (size_t i = 0; i < X.size(); ++i) acumulador.agregar(X[i], Y[i]);
+    return acumulador.resultado();
 }

@@ -98,6 +98,8 @@ Codificado Compresor::codificarUniforme(const Fuente& f) {
     c.metodo = METODO_UNIFORME;
     c.anchoUniforme = bitsPara(f.tamAlfabeto());
     EscritorBits w;
+    // Tamaño exacto reservado de una vez: si el vector crece duplicándose, por un momento ocupa la copia vieja y la nueva
+    w.bytes.reserve((f.numSimbolos() * (uint64_t)c.anchoUniforme + 7) / 8 + 8);
     for (uint32_t id : f.ids) w.escribir(id, c.anchoUniforme);
     w.cerrar();
     c.bitsCarga = w.totalBits;
@@ -111,6 +113,9 @@ Codificado Compresor::codificarHuffman(const Fuente& f) {
     c.longitudes = longitudesHuffman(f.frecuencias, true);
     vector<uint64_t> codigos = codigosCanonicos(c.longitudes);
     EscritorBits w;
+    uint64_t bits = 0;
+    for (size_t id = 0; id < c.longitudes.size(); ++id) bits += f.frecuencias[id] * c.longitudes[id];
+    w.bytes.reserve((bits + 7) / 8 + 8);  // tamaño exacto, de una vez
     for (uint32_t id : f.ids) w.escribir(codigos[id], c.longitudes[id]);
     w.cerrar();
     c.bitsCarga = w.totalBits;
@@ -171,6 +176,9 @@ Codificado Compresor::codificarLZW(const Fuente& f, uint64_t entradasExtra, size
     c.capDiccionario = M + entradasExtra;
     MapaLZW mapa(entradasExtra + 1);
     EscritorBits w;
+    // Como mucho se emite un código por símbolo, de a lo sumo bitsPara(cap) bits. Se reserva ese máximo de una vez: el
+    // sistema sólo ocupa memoria real en las páginas que se escriben, y así el vector nunca se copia al crecer
+    w.bytes.reserve((n * (uint64_t)bitsPara(c.capDiccionario) + 7) / 8 + 8);
 
     uint64_t tamDiccionario = M;
     uint32_t patron = f.ids[0];

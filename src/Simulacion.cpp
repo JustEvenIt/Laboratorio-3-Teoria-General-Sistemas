@@ -173,14 +173,20 @@ struct Estadisticas {
     explicit Estadisticas(int capas = 1) : erroresCapa(capas, 0), bitsCapa(capas, 0) {}
 };
 
-struct EnvioTB { int rv = -1; int64_t errores = 0; int iteraciones = 0; bool ok = false; };
+struct EnvioTB {
+    int rv = -1;
+    int64_t errores = 0;
+    int iteraciones = 0;
+    bool ok = false;
+    string tx, rx, dec;  // primeros 64 bits que salieron, cómo llegaron (antes de corregir) y el mensaje ya corregido
+};
 
 // Lo que le pasa a un bloque de transporte, con números reales (para el paso a paso y la visualización)
 struct TrazaTB {
     int64_t indice = 0, A = 0, G = 0, simbolos = 0, bitsErrados = 0;
     int mcs = -1, Qm = 0, palabra = 0, capaInicial = 0, capasPalabra = 1, L = 0;
     double R = 0, latencia = 0;
-    string crcHex, infoHex;
+    string crcHex, infoHex, claroHex;  // infoHex: lo que viaja (cifrado); claroHex: el comprimido antes de cifrar
     int C = 0, Kp = 0, K = 0, Zc = 0, grafo = 0, N = 0, E = 0, Lcb = 0;  // LDPC
     int n = 0, k = 0;                                                    // código de bloque
     int64_t palabrasBloque = 0;
@@ -444,7 +450,13 @@ ResultadoTB enviarTB(CodigoTB& cod, int64_t A, int64_t G, int Qm, int capasPalab
         est.iteraciones += iter;
         est.bloquesDecodificados += bloques;
         res.ok = nr::verificarCRC(estimado.data(), b.size(), tcrc);
-        if (tr) tr->envios.push_back({rv, errores, iter, res.ok});
+        if (tr) {
+            const size_t m = min<size_t>(64, g.size());
+            vector<uint8_t> duro(m);
+            for (size_t i = 0; i < m; ++i) duro[i] = llr[i] < 0;
+            tr->envios.push_back({rv, errores, iter, res.ok, bitsHex(g.data(), m), bitsHex(duro.data(), m),
+                                  bitsHex(estimado.data(), (size_t)min<int64_t>(A, 64))});
+        }
         if (t == 0 && !res.ok) est.tbsPrimeraMal++;
         if (res.ok) break;  // ACK
     }
@@ -817,6 +829,7 @@ void escribirTraza(Json& j, const TrazaTB& t) {
     j.objeto().ent("tb", t.indice).ent("bits", t.A).ent("bits_codificados", t.G).ent("simbolos", t.simbolos)
      .ent("mcs", t.mcs).ent("qm", t.Qm).num("tasa", t.R).ent("palabra", t.palabra).ent("capa_inicial", t.capaInicial)
      .ent("capas", t.capasPalabra).ent("crc_bits", t.L).str("crc_hex", t.crcHex).str("info_hex", t.infoHex)
+     .str("claro_hex", t.claroHex)
      .num("latencia", t.latencia).booleano("ok", t.ok).ent("bits_errados", t.bitsErrados);
     if (t.C) j.ent("bloques_codigo", t.C).ent("k_prima", t.Kp).ent("k", t.K).ent("zc", t.Zc).ent("grafo", t.grafo)
               .ent("n_buffer", t.N).ent("e", t.E).ent("crc_bloque", t.Lcb);
@@ -825,7 +838,8 @@ void escribirTraza(Json& j, const TrazaTB& t) {
     for (int64_t e : t.erroresCapa) j.ent(nullptr, e);
     j.fin().arreglo("envios");
     for (const EnvioTB& e : t.envios)
-        j.objeto().ent("rv", e.rv).ent("errores", e.errores).ent("iteraciones", e.iteraciones).booleano("ok", e.ok).fin();
+        j.objeto().ent("rv", e.rv).ent("errores", e.errores).ent("iteraciones", e.iteraciones).booleano("ok", e.ok)
+         .str("tx", e.tx).str("rx", e.rx).str("dec", e.dec).fin();
     j.fin().fin();
 }
 
@@ -986,7 +1000,11 @@ int ejecutarSimulacion(const string& rutaOriginal, const string& rutaComprimido,
             c.est.erroresInfo += errados;
             c.est.bitsInfo += trozo;
             if (r.ok) c.bitsBien += trozo;
-            if (tr) tr->bitsErrados = errados;
+            if (tr) {
+                tr->bitsErrados = errados;
+                const size_t b0 = (size_t)(pos / 8);
+                tr->claroHex = bytesHex(comprimido.data() + b0, min<size_t>(8, bytesSim - b0));
+            }
             escribirBits(recibido, pos, salida.data(), trozo);
             pos += trozo;
             avance(fase, (double)ci * totalBits + pos, (double)caminos.size() * totalBits, false);

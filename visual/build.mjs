@@ -10,10 +10,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const kitScript = () => readFileSync(join(HERE, "kit", "iso-kit.mjs"), "utf8").replace(/^export /gm, "");
 
 const WIDTH = 1120;
-const HEIGHT = 470;
+const HEIGHT = 600;
 
 // ---------------- Mundo (unidades ≈ px; x a lo largo de la línea, y hacia el frente, z arriba)
-const PLATE = { x: -310, y: -72, w: 620, d: 144, r: 8 };
+const PLATE = { x: -310, y: -158, w: 620, d: 230, r: 8 };
 const PLATE_H = 12, FOOT_H = 5;
 const RAIL_Y = 36, RAIL_D = 8, RAIL_H = 3;
 const TX_RAIL = { x: -292, y: RAIL_Y, w: 240, d: RAIL_D, r: 1 };
@@ -30,12 +30,23 @@ const ST = {
   tolva: -286, aes: -236, crc: -190, codigo: -140, modular: -94, repartir: -60,
   combinar: 60, decodificar: 106, revisar: 152, descifrar: 198, salida: 280,
 };
+// Fila de atrás: monitor de inspección (contenido de cada paquete) y tablero de casilleros (estado de cada paquete)
+const MON = { x: -296, y: -146, w: 196, d: 26, r: 2 };      // caja; su cara del frente está en y = MON.y + MON.d
+const MON_BASE = { x: -300, y: -150, w: 204, d: 42, r: 2 }; // pedestal
+const MON_Z0 = 4, MON_Z1 = 104;
+const PANTALLA = { x: -286, w: 176, z1: 92, h: 74 };        // en el plano de la cara del frente
+const TAB = { x: 92, y: -152, w: 206, d: 66, r: 3 };
+const TAB_H = 7;
+const POZOS = [];
+for (let f = 0; f < 5; f++) for (let c = 0; c < 8; c++) POZOS.push([118 + 24 * c, -141 + 12.5 * f]);
+const CELDA = 4, GRILLAS = [18, 72, 126], GRILLA_Y = 33;
+
 const NUMEROS = [["tolva", 1], ["aes", 2], ["crc", 3], ["codigo", 4], ["modular", 5], ["repartir", 6],
                  ["combinar", 7], ["decodificar", 8], ["revisar", 9], ["descifrar", 10], ["salida", 11]];
 
 const P = k.fitProjection(
   [...k.boxCorners(PLATE, -PLATE_H - FOOT_H, 0), [0, 0, MAST_TOP + HEAD_H + 4], [ST.aes, POST_BACK, BAR_Z + BAR_H + 10],
-   [ST.revisar, POST_BACK, BAR_Z + BAR_H + 12]],
+   [ST.revisar, POST_BACK, BAR_Z + BAR_H + 12], ...k.boxCorners(MON, MON_Z0, MON_Z1 + 2)],
   WIDTH, HEIGHT, { pad: 26, azimuth: 60 },
 );
 
@@ -277,10 +288,93 @@ function cabezalDial(x, clase, marcas, mayores) {
   return out.join("");
 }
 
+
+// ---------------- Monitor de inspección: su pantalla, en el plano de la cara del frente, muestra el paquete actual
+function monitor() {
+  const out = [];
+  const cara = MON.y + MON.d;
+  out.push(`<path class="iso-halo" d="${k.haloOf(MON_BASE, 0, 4, P)}"/>`);
+  out.push(S(slab(MON_BASE, 0, MON_Z0, 4, 0.6), { tone: "mid" }));
+  out.push(screws(MON_BASE, 2.4, MON_Z0));
+  // Patas de inclinación detrás
+  for (const x of [MON.x + 18, MON.x + MON.w - 18]) out.push(S(slab({ x: x - 4, y: MON.y - 3, w: 8, d: 4, r: 1 }, MON_Z0, 30, 3, 0.4), { tone: "lo" }));
+  out.push(S(slab(MON, MON_Z0, MON_Z1 - MON_Z0, 4, 1.2), { tone: "mid" }));
+  // Rejillas de ventilación en la tapa: ranuras cerradas
+  const rej = [];
+  for (let i = 0; i < 14; i++) {
+    const x0 = MON.x + 30 + i * 10;
+    rej.push(k.pathOf([[x0, MON.y + 6, MON_Z1], [x0 + 5, MON.y + 6, MON_Z1], [x0 + 5, MON.y + 20, MON_Z1], [x0, MON.y + 20, MON_Z1]].map(at), true));
+  }
+  out.push(L(rej.join(""), { tone: "lo" }));
+  // Marco de la pantalla en la cara del frente y tornillos
+  const xs = [PANTALLA.x - 3, PANTALLA.x + PANTALLA.w + 3], zs = [PANTALLA.z1 + 3, PANTALLA.z1 - PANTALLA.h - 3];
+  out.push(L(k.pathOf([[xs[0], cara, zs[0]], [xs[1], cara, zs[0]], [xs[1], cara, zs[1]], [xs[0], cara, zs[1]]].map(at), true), { tone: "lo" }));
+  out.push(D([[MON.x + 4, cara, MON_Z1 - 4], [MON.x + MON.w - 4, cara, MON_Z1 - 4], [MON.x + 4, cara, MON_Z0 + 4], [MON.x + MON.w - 4, cara, MON_Z0 + 4]].map(at), { size: 0.45 }));
+  // Botones y luz de encendido bajo la pantalla
+  for (let i = 0; i < 3; i++) {
+    const x0 = MON.x + MON.w - 56 + i * 14;
+    out.push(S(slab({ x: x0, y: cara, w: 9, d: 1.6, r: 0.5 }, MON_Z0 + 4, 4, 3, 0.2), { tone: "mid" }));
+  }
+  out.push(`<circle data-part="led" r="1.6" cx="${at([MON.x + 14, cara, MON_Z0 + 7])[0].toFixed(2)}" cy="${at([MON.x + 14, cara, MON_Z0 + 7])[1].toFixed(2)}"/>`);
+  // Pantalla: todo en coordenadas de la cara (x a la derecha, y hacia abajo)
+  const m = k.sideMatrix([PANTALLA.x, cara], PANTALLA.z1, P, "left");
+  const p = [`<rect class="pantalla-fondo" x="0" y="0" width="${PANTALLA.w}" height="${PANTALLA.h}" rx="2"/>`];
+  const texto = (x, y, tam, clase, contenido = "", ancla = "start") =>
+    `<text class="pantalla-texto" xml:space="preserve" data-pantalla="${clase}" x="${x}" y="${y}" font-size="${tam}" text-anchor="${ancla}">${contenido}</text>`;
+  p.push(texto(6, 8, 4.6, "estado", "PAQUETE 1"));
+  p.push(texto(6, 16, 4, "claro", "COMPRIMIDO"));
+  p.push(texto(170, 16, 4, "crc", "CRC", "end"));
+  p.push(texto(6, 23, 4, "cifrado", "CIFRADO"));
+  p.push(texto(170, 23, 4, "modulacion", "", "end"));
+  ["MENSAJE", "AIRE", "CORREGIDO"].forEach((nombre, g) => {
+    p.push(texto(GRILLAS[g] + 16, GRILLA_Y - 2.5, 3.6, `titulo${g}`, nombre, "middle"));
+    for (let i = 0; i < 64; i++)
+      p.push(`<rect class="celda" data-g="${g}" data-i="${i}" data-vacio="" x="${GRILLAS[g] + (i % 8) * CELDA + 0.3}" y="${GRILLA_Y + Math.floor(i / 8) * CELDA + 0.3}" width="${CELDA - 0.6}" height="${CELDA - 0.6}"/>`);
+    p.push(texto(GRILLAS[g] + 16, GRILLA_Y + 8 * CELDA + 4.6, 3.4, `cuenta${g}`, "", "middle"));
+  });
+  // Flechas grabadas entre las cuadrículas (parte de la pantalla)
+  for (const x of [GRILLAS[0] + 32 + 4, GRILLAS[1] + 32 + 4])
+    p.push(`<path class="pantalla-flecha" d="M${x} ${GRILLA_Y + 16}h12m-3 -2.5l3 2.5l-3 2.5"/>`);
+  out.push(`<g class="pantalla" transform="${m}"><clipPath id="recorte-pantalla"><rect x="0" y="0" width="${PANTALLA.w}" height="${PANTALLA.h}" rx="2"/></clipPath><g clip-path="url(#recorte-pantalla)">${p.join("")}</g></g>`);
+  return out.join("");
+}
+
+// ---------------- Tablero de casilleros: un pozo por paquete; cada envío deja una ficha
+function tablero() {
+  const out = [`<path class="iso-halo" d="${k.haloOf(TAB, 0, TAB_H, P)}"/>`];
+  out.push(S(slab(TAB, 0, TAB_H, 4, 0.8), { tone: "mid" }));
+  out.push(L(k.planOutline(k.insetPlan(TAB, 3), TAB_H, P, 4), { tone: "faint" }));
+  out.push(screws(TAB, 5, TAB_H));
+  // Números de fila grabados (primer paquete de cada fila)
+  [1, 9, 17, 25, 33].forEach((n, f) =>
+    out.push(k.faceTextSvg(k.topMatrix([TAB.x + 10, POZOS[f * 8][1] + 1.6], TAB_H, P, "x"), String(n), { size: 4.6, tone: "lo", anchor: "middle" })));
+  const orden = POZOS.map((p, i) => [p, i]).sort((a, b) => k.depthOf([a[0][0], a[0][1], 0], P) - k.depthOf([b[0][0], b[0][1], 0], P));
+  for (const [[x, y], i] of orden) {
+    const zona = k.pathOf([[x - 12, y - 6.2, TAB_H], [x + 12, y - 6.2, TAB_H], [x + 12, y + 6.2, TAB_H], [x - 12, y + 6.2, TAB_H]].map(at), true);
+    out.push(`<g data-casilla="${i}"><title>Paquete ${i + 1}</title><path class="casilla-zona" d="${zona}"/>` +
+             `<path class="pozo" d="${k.onTop(k.circleRing(x, y, 4.6, 24), TAB_H, P, true)}"/>` +
+             `${L(k.ring(x, y, 5.4, TAB_H, P, 24), { tone: "lo" })}<g data-ficha="${i}"></g></g>`);
+  }
+  out.push(`<path data-part="marca" class="iso-line" data-tone="lit" d="" style="stroke-width:1"/>`);
+  // Conector del cable del revisor (9)
+  out.push(S(slab({ x: 151, y: TAB.y + TAB.d, w: 12, d: 4, r: 0.8 }, 0, 5, 3, 0.3), { tone: "mid" }));
+  return out.join("");
+}
+
+function cablesInstrumentos() {
+  const mon = [[-144, 14, 3], [-144, 12, 0.6], [-144, MON_BASE.y + MON_BASE.d, 0.6]];
+  const tab = [[156.5, 14, 3], [156.5, 12, 0.6], [156.5, TAB.y + TAB.d + 4, 0.6]];
+  const w = (r) => k.wireSvg(at(r[0]), at(r[r.length - 1]), { via: r.slice(1, -1).map(at), tone: "lo", size: 0.9 });
+  return w(mon) + w(tab);
+}
+
 // ---------------- Armado en orden de pintura (atrás → adelante, abajo → arriba)
 const harq = cableHARQ();
 const cuerpo = [
   base(),
+  monitor(),
+  tablero(),
+  cablesInstrumentos(),
   `<g data-part="harq">${harq.svg}</g>`,
   `<circle data-part="pulso" r="1.8" cx="0" cy="0" style="opacity:0"/>`,
   cajaConector(ST.codigo, 14), cajaConector(ST.revisar, 14),
@@ -323,13 +417,14 @@ if (rutaEjemplo && existsSync(rutaEjemplo)) {
       fallidos: Math.round(c.bler_final * c.bloques_transporte), identico: c.identico, descifrado_ok: c.descifrado_ok,
       traza: c.traza.map((t) => ({ tb: t.tb, bits: t.bits, qm: t.qm, tasa: t.tasa, simbolos: t.simbolos, palabra: t.palabra,
         capa_inicial: t.capa_inicial, capas: t.capas, errores_capa: t.errores_capa, ok: t.ok, latencia_ms: t.latencia * 1e3,
-        bloques_codigo: t.bloques_codigo || 0, crc: t.crc_hex,
-        envios: t.envios.map((x) => ({ errores: x.errores, ok: x.ok, iteraciones: x.iteraciones, rv: x.rv })) })),
+        bloques_codigo: t.bloques_codigo || 0, crc: t.crc_hex, info: t.info_hex, claro: t.claro_hex || "",
+        envios: t.envios.map((x) => ({ errores: x.errores, ok: x.ok, iteraciones: x.iteraciones, rv: x.rv,
+                                       tx: x.tx || "", rx: x.rx || "", dec: x.dec || "" })) })),
     })),
   };
 }
 
-const CONST = { P, ST, LANES, MAST_X, AIR_Z, CART_Y, RAIL_H, CART, harq: harq.ruta };
+const CONST = { P, ST, LANES, MAST_X, AIR_Z, CART_Y, RAIL_H, CART, harq: harq.ruta, POZOS, TAB_H };
 const live = readFileSync(join(HERE, "vivo.js"), "utf8")
   .replace("/*__CONST__*/null", JSON.stringify(CONST))
   .replace("/*__EJEMPLO__*/null", JSON.stringify(ejemplo));
@@ -341,14 +436,16 @@ const controles = `<div class="viaje-controles" role="group" aria-label="Control
 
 const body = k.plateHtml({
   fig: "Fig 1",
-  title: "Un bloque por la red, capa por capa",
-  hint: "Flechas: bloque · espacio: pausa",
+  title: "Un paquete por la red, capa por capa",
+  hint: "Flechas: paquete · espacio: pausa",
   readout: "Bloque 1",
   keys: [
-    { mark: "lit", label: "El bloque de transporte que viaja, del color de su código (azul LDPC, naranja código de bloque, gris sin código); en gris detrás, la paridad que agrega el código" },
+    { mark: "lit", label: "El paquete (bloque de transporte) que viaja, del color de su código (azul LDPC, naranja código de bloque, gris sin código); en gris detrás, la paridad que agrega el código" },
     { mark: "raised", label: "1 archivo comprimido · 2 cifrado AES-128 · 3 CRC · 4 código (y buffer HARQ) · 5 modulación QAM · 6 reparto en capas" },
     { mark: "raised", label: "7 combinar capas · 8 decodificar (aguja: iteraciones) · 9 revisar CRC (luz ACK o NACK) · 10 descifrar · 11 archivo recuperado" },
-    { mark: "line", label: "Cuentas del aire: símbolos de cada capa (rojas: llegaron más cerca de otro punto). Cable de atrás: respuesta ACK/NACK. Esfera del centro: SNR por capa" },
+    { mark: "line", label: "Cuentas del aire: símbolos de cada capa (rojas: llegaron más cerca de otro punto). Cable de atrás: respuesta ACK/NACK. Esfera del frente: SNR por capa" },
+    { mark: "raised", label: "Monitor (atrás, izquierda): el paquete actual. Sus bytes antes y después de cifrar, su CRC y sus primeros 64 bits: el mensaje, cómo llegaron por el aire (rojo: cambió) y cómo quedaron después de corregir (rojo: sigue mal)" },
+    { mark: "raised", label: "Tablero (atrás, derecha): un pozo por paquete, una ficha por envío. Verde: llegó al primer envío. Ámbar: se recuperó repitiéndolo. Rojo: falló. Clic en un pozo para ver ese paquete" },
   ],
   caption: "__PIE__",
   body: `${controles}<div class="iso-stage" tabindex="0" aria-label="Viaje de los bloques: flechas para cambiar de bloque, espacio para pausar">${svg}</div>`,
@@ -372,6 +469,23 @@ const css = `
 [data-cabeza][data-activa] path:not(.iso-line){fill:var(--anatomy-hi)}
 [data-cable][data-activo] .iso-line{stroke:var(--anatomy-hi)}
 .iso-page{margin:8px auto 8px}
+.pantalla-fondo{fill:#161b20;stroke:#59636e;stroke-width:.5}
+.pantalla-texto{white-space:pre;fill:#d6dde4;font-family:"Cascadia Mono",Consolas,"DejaVu Sans Mono",monospace;letter-spacing:.02em}
+.pantalla-texto[data-pantalla^="titulo"],.pantalla-texto[data-pantalla^="cuenta"]{fill:#9aa6b2}
+.pantalla-flecha{fill:none;stroke:#6e7a86;stroke-width:.6;stroke-linecap:round;stroke-linejoin:round}
+.celda{fill:#3a434c;transition:fill .15s}
+.celda[data-bit="1"]{fill:#e6edf3}
+.celda[data-bit="0"]{fill:#3d4650}
+.celda[data-vacio]{fill:#22292f}
+.celda[data-mal]{fill:#ff5d5d}
+[data-part="led"]{fill:#2da44e}
+.pozo{fill:var(--anatomy-faint)}
+.casilla-zona{fill:transparent;cursor:pointer}
+[data-casilla]{cursor:pointer}
+[data-casilla]:hover .pozo{fill:var(--anatomy-lo)}
+[data-estado="ok"]{--anatomy-face:#2da44e;--anatomy-lit-top:#6fd08c;--anatomy-lit-shade:#1d7a38}
+[data-estado="rec"]{--anatomy-face:#d29922;--anatomy-lit-top:#f2c45a;--anatomy-lit-shade:#9a6c0c}
+[data-estado="mal"]{--anatomy-face:#d1242f;--anatomy-lit-top:#f07178;--anatomy-lit-shade:#9c1a22}
 `;
 
 const html = k.pageHtml({ title: "Viaje de los bloques", theme: "light", body, script: kitScript() + live, width: WIDTH })

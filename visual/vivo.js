@@ -154,6 +154,107 @@ function aire(t, e, j, u) {
   }
 }
 
+
+// ---------------- Monitor de inspección: contenido del paquete actual
+const pantalla = (n) => svg.querySelector(`[data-pantalla="${n}"]`);
+const celdas = [0, 1, 2].map((g) => [...svg.querySelectorAll(`.celda[data-g="${g}"]`)].sort((a, b) => a.dataset.i - b.dataset.i));
+const espaciar = (h) => (h || "").toUpperCase().match(/.{1,2}/g)?.join(" ") || "—";
+const bitsDe = (h) => {
+  if (!h) return null;
+  const b = [];
+  for (const c of h) { const v = parseInt(c, 16); for (let k = 3; k >= 0; k--) b.push((v >> k) & 1); }
+  return b;
+};
+const escribir = (n, txt) => { const el = pantalla(n); if (el && el.textContent !== txt) el.textContent = txt; };
+// Pinta una cuadrícula: bits (o null = vacía); 'ref' marca en rojo los bits distintos; 'filas' cuántas filas se ven
+function grilla(g, bits, ref, filas = 8) {
+  let distintos = 0;
+  celdas[g].forEach((c, i) => {
+    const visible = bits && i < bits.length && Math.floor(i / 8) < filas;
+    const mal = visible && ref && ref[i] !== bits[i];
+    if (mal) distintos++;
+    if (!visible) { c.setAttribute("data-vacio", ""); c.removeAttribute("data-bit"); c.removeAttribute("data-mal"); return; }
+    c.removeAttribute("data-vacio");
+    c.setAttribute("data-bit", String(bits[i]));
+    c.toggleAttribute("data-mal", !!mal);
+  });
+  return distintos;
+}
+const MOD_TXT = (t) => `${MOD[t.qm] || ""} · R ${t.tasa.toFixed(3)}`;
+
+function monitor(t, fase, u, idx) {
+  const j = fase.j ?? 0, e = t.envios[Math.min(j, t.envios.length - 1)];
+  const n = datosCamino().traza.length;
+  const hecho = (tipo) => fases.slice(0, idx).some((f) => f.tipo === tipo && (f.j ?? 0) === j);
+  const revisado = hecho("revisar") || (fase.tipo === "revisar" && u > 0.3);
+  escribir("estado", `PAQUETE ${tb + 1} DE ${n} · ENVÍO ${j + 1} DE ${t.envios.length}` +
+                     (revisado ? ` · CRC ${e.ok ? "CORRECTO" : "INCORRECTO"}` : ""));
+  escribir("claro", `COMPRIMIDO ${espaciar(t.claro)}`);
+  escribir("cifrado", DATOS.cifrado ? `CIFRADO    ${espaciar(t.info)}` : "SIN CIFRAR: IGUAL AL COMPRIMIDO");
+  escribir("crc", `CRC ${(t.crc || "").toUpperCase()}`);
+  escribir("modulacion", MOD_TXT(t));
+  const mensaje = bitsDe(t.info), tx = bitsDe(e.tx), rx = bitsDe(e.rx), dec = bitsDe(e.dec);
+  // Mensaje: siempre; aire: lo que sale y, al cruzar, cómo llega; corregido: al decodificar
+  grilla(0, mensaje, null);
+  escribir("cuenta0", mensaje ? `${mensaje.length} BITS` : "SIN DATOS");
+  let aire = 0, filasAire = 0, verAire = tx;
+  if (fase.tipo === "aire") { filasAire = Math.ceil(8 * Math.min(1, u * 1.25)); verAire = rx; }
+  else if (hecho("aire")) { filasAire = 8; verAire = rx; }
+  if (verAire === rx && rx) {
+    aire = grilla(1, rx, tx, filasAire);
+    escribir("cuenta1", filasAire >= 8 ? `${aire} CAMBIARON` : "…");
+  } else {
+    grilla(1, tx, null);
+    escribir("cuenta1", tx ? "SALEN" : "SIN DATOS");
+  }
+  let filasDec = 0;
+  if (fase.tipo === "decodificar") filasDec = Math.ceil(8 * Math.min(1, u * 1.25));
+  else if (hecho("decodificar")) filasDec = 8;
+  if (filasDec && dec) {
+    const malos = grilla(2, dec, mensaje, filasDec);
+    escribir("cuenta2", filasDec >= 8 ? `${malos} ERRADOS` : "…");
+  } else {
+    grilla(2, null, null);
+    escribir("cuenta2", "");
+  }
+}
+
+// ---------------- Tablero: una ficha por envío en el pozo de cada paquete
+const POZOS = C.POZOS;
+const marca = parte("marca");
+const fichas = [...svg.querySelectorAll("[data-ficha]")].sort((a, b) => a.dataset.ficha - b.dataset.ficha);
+const casillas = [...svg.querySelectorAll("[data-casilla]")].sort((a, b) => a.dataset.casilla - b.dataset.casilla);
+const estadoFicha = [];
+function estadoDe(t) { return !t.ok ? "mal" : t.envios.length > 1 ? "rec" : "ok"; }
+function ponerFicha(i, t) {
+  const clave = t ? `${estadoDe(t)}${t.envios.length}` : "";
+  if (estadoFicha[i] === clave) return;
+  estadoFicha[i] = clave;
+  const g = fichas[i];
+  if (!t) { g.innerHTML = ""; g.removeAttribute("data-estado"); return; }
+  const [x, y] = POZOS[i];
+  let html = "";
+  for (let k = 0; k < t.envios.length; k++)
+    html += solidSvg(cylinder(x, y, 3.7, C.TAB_H + k * 2, 1.7, P, 20, 0.3), { tone: "hi", lit: true });
+  g.innerHTML = html;
+  g.setAttribute("data-estado", estadoDe(t));
+}
+function tablero(c, fase) {
+  const llegado = fase.tipo === "pausa";
+  for (let i = 0; i < POZOS.length; i++) {
+    const t = c.traza[i];
+    const visible = t && (i < tb || (i === tb && llegado));
+    ponerFicha(i, visible ? t : null);
+    const titulo = casillas[i] && casillas[i].querySelector("title");
+    const txt = !t ? `Pozo ${i + 1}: sin paquete` :
+      `Paquete ${i + 1}: ${t.ok ? (t.envios.length > 1 ? `recuperado con ${t.envios.length} envíos` : "llegó al primer envío") : `falló después de ${t.envios.length} envíos`} · ${t.latencia_ms.toFixed(3)} ms`;
+    if (titulo && titulo.textContent !== txt) titulo.textContent = txt;
+  }
+  const [x, y] = POZOS[Math.min(tb, POZOS.length - 1)];
+  const d = ring(x, y, 6.6, C.TAB_H + 0.05, P, 28);
+  if (marca.getAttribute("d") !== d) marca.setAttribute("d", d);
+}
+
 const RUTA = C.harq;
 const largoRuta = RUTA.slice(1).reduce((s, p, i) => s + Math.hypot(p[0] - RUTA[i][0], p[1] - RUTA[i][1], p[2] - RUTA[i][2]), 0);
 function puntoRuta(u) {
@@ -174,7 +275,7 @@ function texto(fase, t, e) {
     case "sale": return `1 · sale del archivo comprimido: ${fmt(t.bits)} bits`;
     case "aes": return DATOS.cifrado ? "2 · se cifra con AES-128 (modo contador)" : "2 · sin cifrar";
     case "crc": return `3 · se agrega el CRC ${t.crc}`;
-    case "reaparece": return `NACK recibido: el transmisor saca el bloque de su buffer${env}`;
+    case "reaparece": return `NACK recibido: el transmisor saca el paquete de su buffer${env}`;
     case "codigo":
       if (fase.j > 0) return c.clave === "ldpc" ? `4 · LDPC: otra versión de redundancia, rv = ${e.rv}${env}` : `4 · se repite la misma palabra${env}`;
       return c.clave === "ldpc" ? `4 · LDPC de 5G: tasa ${R}` : c.clave === "sin" ? "4 · sin código: sólo el CRC" : `4 · ${c.nombre}: tasa ${R}`;
@@ -185,7 +286,7 @@ function texto(fase, t, e) {
       if (c.clave === "ldpc") return `8 · LDPC: ${fmt(e.iteraciones)} iteraciones (${(e.iteraciones / Math.max(1, t.bloques_codigo)).toFixed(1)} por parte)${env}`;
       return c.clave === "sin" ? `8 · se decide cada bit${env}` : `8 · síndrome y líder de clase${env}`;
     case "revisar": return e.ok ? "9 · CRC correcto → ACK" : "9 · CRC incorrecto → NACK";
-    case "respuesta": return e.ok ? "ACK: el transmisor pasa al bloque siguiente" : (fase.j < t.envios.length - 1 ? "NACK: el transmisor lo envía otra vez" : "NACK y no quedan envíos: se entrega con errores");
+    case "respuesta": return e.ok ? "ACK: el transmisor pasa al paquete siguiente" : (fase.j < t.envios.length - 1 ? "NACK: el transmisor lo envía otra vez" : "NACK y no quedan envíos: se entrega con errores");
     case "espera": return "el receptor guarda lo recibido para combinarlo con el próximo envío";
     case "descifrar": return DATOS.cifrado ? "10 · se descifra (el mismo AES en modo contador)" : "10 · sin cifrar";
     case "pausa": return `11 · ${t.ok ? "llegó bien" : "llegó con errores"} · ${t.latencia_ms.toFixed(3)} ms`;
@@ -260,17 +361,19 @@ function dibujar() {
   tejas.tx.forEach((g, i) => { g.style.opacity = i < Math.ceil(10 * (n - tb) / n) ? "1" : "0"; });
   tejas.rx.forEach((g, i) => { g.style.opacity = i < Math.floor(10 * entregados / n) ? "1" : "0"; });
 
+  monitor(t, fase, u, idx);
+  tablero(c, fase);
   const linea = texto(fase.tipo === "mover" ? (fases[idx + 1] || fase) : fase, t, e);
-  const lectura = `Bloque ${tb + 1} de ${n}` + (t.envios.length > 1 ? ` · ${t.envios.length} envíos` : "") + (linea ? ` · ${linea}` : "");
+  const lectura = `Paquete ${tb + 1} de ${n}` + (t.envios.length > 1 ? ` · ${t.envios.length} envíos` : "") + (linea ? ` · ${linea}` : "");
   if (readout.textContent !== lectura) readout.textContent = lectura;
 }
 
 function resumen() {
   const c = datosCamino();
-  const palabras = DATOS.palabras > 1 ? `, ${DATOS.palabras} bloques a la vez (uno por cada ${DATOS.capas_palabra} capas)` : "";
-  pie.textContent = `${DATOS.escenario} · ${c.nombre}: ${fmt(c.bloques)} bloques, ${fmt(c.envios)} envíos, ${fmt(c.fallidos)} con errores al final. ` +
+  const palabras = DATOS.palabras > 1 ? `, ${DATOS.palabras} paquetes a la vez (uno por cada ${DATOS.capas_palabra} capas)` : "";
+  pie.textContent = `${DATOS.escenario} · ${c.nombre}: ${fmt(c.bloques)} paquetes, ${fmt(c.envios)} envíos, ${fmt(c.fallidos)} con errores al final. ` +
     `${DATOS.capas} capa${DATOS.capas > 1 ? "s" : ""} MIMO${palabras}; con SNR ${DATOS.snr_db.toFixed(1)} dB cada capa llega con ` +
-    `${DATOS.snr_capa_db.toFixed(1)} dB porque la potencia se reparte entre ellas. Se muestran los primeros ${c.traza.length} bloques, con sus números reales.`;
+    `${DATOS.snr_capa_db.toFixed(1)} dB porque la potencia se reparte entre ellas. Se muestran los primeros ${c.traza.length} paquetes (bloques de transporte), con sus números reales.`;
 }
 
 function irA(n) {
@@ -296,6 +399,12 @@ function tick(ahora) {
 function correr() { if (!cuadro && visible && !pausa) { ultimo = 0; cuadro = requestAnimationFrame(tick); } }
 
 // Controles
+svg.addEventListener("click", (ev) => {
+  const g = ev.target.closest("[data-casilla]");
+  if (!g) return;
+  const i = Number(g.dataset.casilla);
+  if (i < datosCamino().traza.length) irA(i);
+});
 const caja = document.querySelector("[data-caminos]");
 DATOS.caminos.forEach((c, i) => {
   const b = document.createElement("button");

@@ -59,7 +59,9 @@ Fuente ProcesadorFuente::fragmentar(const string& ruta, const vector<unsigned ch
     // El último bloque se completa con ceros; el tamaño original permite quitarlos al reconstruir
     f.datos.assign(contenido.begin(), contenido.end());
     f.datos.resize(nBloques * B, 0);
-    f.ids.resize(nBloques);
+    // Como mucho hay 2^N símbolos distintos, y nunca más que bloques
+    const uint64_t maxSimbolos = nBits >= 32 ? (uint64_t)nBloques : min<uint64_t>(1ULL << nBits, nBloques);
+    f.ids.preparar(nBloques, maxSimbolos);
 
     // Tabla hash de direccionamiento abierto: guarda id+1 (0 = vacío)
     size_t capacidad = 1 << 16;
@@ -85,7 +87,7 @@ Fuente ProcesadorFuente::fragmentar(const string& ruta, const vector<unsigned ch
             if (hashes[id] == h && memcmp(f.datos.data() + f.primerBloque[id] * B, p, B) == 0) break;
             i = (i + 1) & (capacidad - 1);
         }
-        f.ids[b] = id;
+        f.ids.poner(b, id);
         f.frecuencias[id]++;
 
         // Mantener la ocupación por debajo del 50%

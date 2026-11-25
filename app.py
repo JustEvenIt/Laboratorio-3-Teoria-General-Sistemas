@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -8,7 +9,6 @@ import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 RAIZ = Path(__file__).resolve().parent
 EJECUTABLE = RAIZ / "codificador_6g.exe"
@@ -59,9 +59,31 @@ def compilar_si_hace_falta():
     return True
 
 
+@st.cache_resource
+def control_procesos():
+    """Compartido por todas las sesiones de la app (cada pestaña del navegador, y cada vez que se recarga la página, es una
+    sesión nueva). Con archivos de cientos de MB el núcleo usa varios GB de memoria; dos procesos a la vez la agotaban y el
+    sistema terminaba procesos al azar, incluida la terminal."""
+    try:  # si aun así la memoria se agota, el sistema termina antes esta app que la terminal (el núcleo usa 1000)
+        Path("/proc/self/oom_score_adj").write_text("500")
+    except OSError:
+        pass
+    return {"candado": threading.Lock(), "ultimo": None, "simulacion": None}
+
+
 def ejecutar(args):
-    r = subprocess.run([str(EJECUTABLE), *args], capture_output=True, cwd=RAIZ)
-    return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace")
+    """Corre el núcleo C++, un proceso a la vez entre todas las sesiones. Si mientras esperaba otra sesión corrió exactamente
+    lo mismo (por ejemplo, al recargar la página durante un procesamiento), se usa ese resultado en lugar de repetirlo."""
+    ctl = control_procesos()
+    pedido = time.time()
+    with ctl["candado"]:
+        u = ctl["ultimo"]
+        if u and u["args"] == list(args) and u["fin"] >= pedido:
+            return u["rc"], u["out"], u["err"]
+        r = subprocess.run([str(EJECUTABLE), *args], capture_output=True, cwd=RAIZ)
+        res = (r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"))
+        ctl["ultimo"] = {"args": list(args), "fin": time.time(), "rc": res[0], "out": res[1], "err": res[2]}
+    return res
 
 
 def grafico_barras(df, x, y, titulo_x, titulo_y, tooltip, orden_x=None):
@@ -692,8 +714,10 @@ def lanzar_simulacion(args, ruta_json, ruta_prog, archivo, bits):
     with open(ruta_log, "w", encoding="utf-8") as log:
         proc = subprocess.Popen([str(EJECUTABLE), *args, "--progreso", str(ruta_prog)], stdout=log,
                                 stderr=subprocess.STDOUT, cwd=RAIZ)
-    st.session_state["sim_trabajo"] = {"proc": proc, "json": str(ruta_json), "prog": str(ruta_prog), "log": str(ruta_log),
-                                       "archivo": archivo, "inicio": time.time(), "bits": bits}
+    trabajo = {"proc": proc, "json": str(ruta_json), "prog": str(ruta_prog), "log": str(ruta_log),
+               "archivo": archivo, "inicio": time.time(), "bits": bits}
+    st.session_state["sim_trabajo"] = trabajo
+    control_procesos()["simulacion"] = trabajo  # visible desde cualquier sesión: una sola simulación a la vez
 
 
 @st.fragment(run_every=1.0)
@@ -749,12 +773,14 @@ def dialogo_visualizar(s):
                                 "palabra": t["palabra"], "capa_inicial": t["capa_inicial"], "capas": t["capas"],
                                 "errores_capa": t["errores_capa"], "ok": t["ok"], "latencia_ms": t["latencia"] * 1e3,
                                 "bloques_codigo": t.get("bloques_codigo", 0), "crc": t["crc_hex"],
-                                "envios": [{"errores": x["errores"], "ok": x["ok"], "iteraciones": x["iteraciones"], "rv": x["rv"]}
+                                "info": t["info_hex"], "claro": t.get("claro_hex", ""),
+                                "envios": [{"errores": x["errores"], "ok": x["ok"], "iteraciones": x["iteraciones"], "rv": x["rv"],
+                                            "tx": x.get("tx", ""), "rx": x.get("rx", ""), "dec": x.get("dec", "")}
                                            for x in t["envios"]]} for t in c["traza"]]}
                     for c in s["caminos"]],
     }
     html = VISUAL.read_text(encoding="utf-8").replace("/*__DATOS__*/null", json.dumps(datos, ensure_ascii=False))
-    components.html(html, height=900, scrolling=True)
+    st.iframe(html, height=1000)  # HTML generado por el propio programa (visual/viaje.html) con los datos de la simulación
 
 
 def sim_resumen(s, res):
@@ -1216,6 +1242,12 @@ def seccion_simulacion(res, d):
                 "tanto.")
 
     trabajo = st.session_state.get("sim_trabajo")
+    en_curso = control_procesos()["simulacion"]
+    if trabajo is None and en_curso is not None and en_curso["proc"].poll() is None:
+        # Hay una simulación corriendo desde otra sesión (o desde antes de recargar la página): se sigue aquí su avance
+        st.session_state["sim_trabajo"] = trabajo = en_curso
+        if en_curso["archivo"] != res["archivo"]:
+            st.info(f"Hay una simulación en curso de **{en_curso['archivo']}**. Se puede simular otro archivo cuando termine.")
     sim = st.session_state.get("simulacion")
     if not (sim and sim["archivo"] == res["archivo"]) and trabajo is None:
         # La última simulación de este archivo queda guardada: se muestra sin repetirla (con archivos grandes tarda minutos)

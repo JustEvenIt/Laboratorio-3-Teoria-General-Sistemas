@@ -240,7 +240,11 @@ falta. Los resultados quedan en sub-pestañas:
 El botón **Visualizar** abre una figura animada: un banco de pruebas con 11 estaciones numeradas donde cada bloque sale del
 archivo, se cifra, recibe su CRC, se codifica, se modula, se reparte entre las antenas de sus capas, cruza el aire (las cuentas
 rojas son símbolos que el ruido acercó a otro punto) y en el receptor se combina, se decodifica (la aguja marca las
-iteraciones), se revisa el CRC (luz ACK o NACK; el aviso vuelve por el cable de atrás) y, si falla, se envía otra vez.
+iteraciones), se revisa el CRC (luz ACK o NACK; el aviso vuelve por el cable de atrás) y, si falla, se envía otra vez. Al
+fondo, un **monitor** muestra el contenido del paquete actual: sus bytes antes y después de cifrar, su CRC y sus primeros 64 bits
+en tres cuadrículas (el mensaje; cómo llegaron por el aire, en rojo los que cambiaron; y cómo quedaron después de corregir, en
+rojo los que siguen mal). Al lado, un **tablero** tiene un pozo por paquete: cada paquete que termina deja una ficha por envío,
+verde si llegó al primer envío, ámbar si se recuperó repitiéndolo y roja si falló; con un clic en un pozo se ve ese paquete.
 
 **Qué decir.**
 - "Esto ya no es una fórmula: cada bit del archivo pasa por la cadena de la norma y se cuenta lo que llega."

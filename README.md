@@ -116,8 +116,10 @@ en el código de bloque y sin código).
 
 La pestaña tiene sub-pestañas: **Resumen**, **Paso a paso** (el primer bloque con los números reales de cada etapa),
 **Capas MIMO**, **Agente** (sólo pruebas: medición de las 12 opciones y lo que probó el agente), **Constelación** (con cómo
-leerla), **Curvas BLER** y **Confiabilidad**. El botón **Visualizar** abre una figura animada donde cada bloque recorre el
-transmisor, cruza el aire por sus capas y llega al receptor, con sus errores, iteraciones y ACK/NACK reales.
+leerla), **Curvas BLER** y **Confiabilidad**. El botón **Visualizar** abre una figura animada donde cada paquete (bloque de
+transporte) recorre el transmisor, cruza el aire por sus capas y llega al receptor, con sus errores, iteraciones y ACK/NACK
+reales; un monitor muestra el contenido de cada paquete (bytes, CRC y sus primeros 64 bits antes y después del canal y de
+corregir) y un tablero de 40 pozos muestra cómo terminó cada uno (al primer envío, recuperado con HARQ o fallido).
 
 | Parte | Referencia | Archivo |
 |---|---|---|
@@ -143,7 +145,10 @@ entregados dentro del plazo de latencia por segundo) y elige la mejor. Después 
 
 **Archivos grandes.** La simulación guarda 8 bits en cada byte (antes usaba un byte entero por cada bit), decodifica
 en paralelo con todos los núcleos y corre en segundo plano con una barra de avance. Un archivo de 600 MB necesita unos 2,5 GB de
-memoria. Los resultados se comparan con los requisitos de IMT-2020 (ITU-R M.2410) y de IMT-2030 (ITU-R M.2160); la
+memoria. El procesamiento principal guarda la lista de símbolos con el ancho justo (1 byte por símbolo con N = 8) y reserva
+la memoria de cada etapa de una vez: la imagen de 700 MB usa como máximo 3.7 GB. El programa se marca para que, si la memoria
+del sistema se agota, el sistema lo termine a él y no a la terminal (`/proc/self/oom_score_adj`), y la aplicación corre un solo
+proceso pesado a la vez entre todas sus sesiones. Con `CODIFICADOR_MEMORIA=1` imprime la memoria usada en cada etapa. Los resultados se comparan con los requisitos de IMT-2020 (ITU-R M.2410) y de IMT-2030 (ITU-R M.2160); la
 prueba de confiabilidad envía paquetes de 32 bytes dentro del plazo y da la cota de Clopper-Pearson al 95 %. También calcula
 las curvas BLER frente a SNR de los cuatro códigos con su límite de Shannon.
 

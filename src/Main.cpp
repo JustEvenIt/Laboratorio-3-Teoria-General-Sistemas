@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -64,6 +65,19 @@ static void uso() {
             "     codificador_6g --confiabilidad [--escenario urllc] [--snr 10] [--paquetes 300000] [--json RUTA]\n"
             "                    [--snr-desde A --snr-hasta B --snr-paso 1] [--bloques-curva 100] [--json RUTA]\n"
             "N debe ser multiplo de 8, entre 8 y 32768.\n";
+}
+
+// Con la variable de entorno CODIFICADOR_MEMORIA=1 imprime la memoria usada en cada etapa (para medir archivos grandes)
+static void memoriaEtapa(const char* etapa) {
+    static const bool activa = getenv("CODIFICADOR_MEMORIA") != nullptr;
+    if (!activa) return;
+    ifstream st("/proc/self/status");
+    string linea, actual, maxima;
+    while (getline(st, linea)) {
+        if (linea.rfind("VmRSS:", 0) == 0) actual = linea.substr(6);
+        if (linea.rfind("VmHWM:", 0) == 0) maxima = linea.substr(6);
+    }
+    cerr << "[Memoria] " << etapa << ": en uso" << actual << " | máxima" << maxima << "\n";
 }
 
 static bool nValido(int n) { return n >= 8 && n <= 32768 && n % 8 == 0; }
@@ -185,6 +199,14 @@ static int ejecutarBarrido(const Opciones& op, const vector<unsigned char>& cont
 }
 
 int main(int argc, char* argv[]) {
+#ifdef __linux__
+    // Con archivos grandes este programa usa varios GB. Si la memoria del sistema se agota, Linux termina al proceso con
+    // mayor puntaje: con 1000 (el máximo) se termina este programa y nunca la terminal ni la aplicación.
+    {
+        ofstream puntaje("/proc/self/oom_score_adj");
+        if (puntaje) puntaje << 1000;
+    }
+#endif
     Opciones op;
     vector<string> posicionales;
     for (int i = 1; i < argc; ++i) {
@@ -335,6 +357,7 @@ int main(int argc, char* argv[]) {
         return ejecutarAgente(op.ag, contenido);
     }
 
+    memoriaEtapa("leido");
     // ===== ETAPA 1: FUENTE =====
     auto t = chrono::steady_clock::now();
     Fuente f = procesador.fragmentar(op.ruta, contenido, op.nBits);
@@ -349,6 +372,7 @@ int main(int argc, char* argv[]) {
          << "[Fuente] N=" << op.nBits << " bits/simbolo -> " << n << " simbolos, " << M << " distintos\n"
          << "[Fuente] H=" << mf.entropia << " bits/simbolo (max " << mf.entropiaMaxima << "), KL(P||U)=" << mf.klUniformeN << "\n";
 
+    memoriaEtapa("fuente");
     // ===== ETAPA 2: CODIFICACIÓN (uniforme / no uniforme / adaptable) =====
     // Cada flujo se mide apenas se codifica y se libera si ya no puede ser el elegido: con archivos grandes cada uno
     // ocupa cientos de MB y tenerlos todos a la vez podía agotar la memoria
@@ -403,6 +427,7 @@ int main(int argc, char* argv[]) {
          << " sigma^2=" << mh.varianza << " | LZW " << lzwMedia << " bits/simbolo\n"
          << "[Codificacion] Metodo elegido: " << nombreMetodo(elegido) << (op.metodo == "auto" ? " (adaptable)" : "") << "\n";
 
+    memoriaEtapa("codificacion");
     // ===== ETAPA 3: COMPRESIÓN (archivo autocontenido) =====
     fs::create_directories(op.salida);
     string ext = fs::path(op.ruta).extension().string();
@@ -414,6 +439,7 @@ int main(int argc, char* argv[]) {
     cout << "[Compresion] " << f.tamanoOriginal << " -> " << tamComprimido << " bytes ("
          << (double)f.tamanoOriginal / tamComprimido << ":1)\n";
 
+    memoriaEtapa("compresion");
     // ===== ETAPA 4: RECONSTRUCCIÓN (sólo a partir del archivo comprimido) =====
     t = chrono::steady_clock::now();
     vector<unsigned char> reconstruido;
@@ -429,6 +455,7 @@ int main(int argc, char* argv[]) {
     reconstruido.shrink_to_fit();
     cout << "[Reconstruccion] " << (exacto ? "Identica al original (sin perdida)" : "DIFERENTE al original") << "\n";
 
+    memoriaEtapa("reconstruccion");
     // ===== ETAPA 5: CANAL BSC Y INFORMACIÓN MUTUA =====
     // Lo que obtiene el receptor con un flujo comprimido recibido: se decodifica símbolo por símbolo, se escribe el
     // archivo (⊥ se escribe como ceros) y se acumula I(X;Y) entre la fuente y lo recibido, sin guardar la secuencia
@@ -464,6 +491,7 @@ int main(int argc, char* argv[]) {
     cout << "[Canal] BSC p=" << op.p << " | errores de bit: " << (rc.errores01 + rc.errores10)
          << " | I(X;Y) simbolos=" << mm.IXY << " de H(X)=" << mf.entropia << "\n";
 
+    memoriaEtapa("canal");
     // ===== ETAPA 6: CONTROL DE ERROR (código de bloque lineal: corrección FEC y retransmisión ARQ) =====
     // El mismo flujo comprimido pasa por el mismo BSC (misma p y semilla), ahora protegido con el código
     struct Recuperacion {
@@ -502,6 +530,7 @@ int main(int argc, char* argv[]) {
     // ===== RESULTADOS PARA LA INTERFAZ =====
     if (op.json.empty()) return exacto ? 0 : 3;
     ofstream archivoJson(op.json);
+    memoriaEtapa("control de error");
     Json j(archivoJson);
     j.objeto().str("modo", "completo");
 

@@ -2,8 +2,54 @@
 #define PROCESADOR_FUENTE_H
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
+
+// Secuencia de índices de símbolos guardada con el ancho justo: 1 byte si el alfabeto puede tener hasta 256 símbolos
+// (N = 8), 2 bytes hasta 65 536 y 4 bytes en otro caso. Con archivos grandes es lo que más memoria ocupa: con N = 8 y un
+// archivo de 700 MB son 700 MB en lugar de 2.8 GB.
+class SecuenciaIds {
+public:
+    // n índices, cada uno menor que maxSimbolos
+    void preparar(size_t n, uint64_t maxSimbolos) {
+        ancho = maxSimbolos <= 256 ? 1 : maxSimbolos <= 65536 ? 2 : 4;
+        tam = n;
+        bytes.assign(n * ancho, 0);
+    }
+    size_t size() const { return tam; }
+    bool empty() const { return tam == 0; }
+    uint32_t operator[](size_t i) const {
+        if (ancho == 1) return bytes[i];
+        if (ancho == 2) { uint16_t v; std::memcpy(&v, &bytes[2 * i], 2); return v; }
+        uint32_t v;
+        std::memcpy(&v, &bytes[4 * i], 4);
+        return v;
+    }
+    void poner(size_t i, uint32_t v) {
+        if (ancho == 1) bytes[i] = (uint8_t)v;
+        else if (ancho == 2) { const uint16_t w = (uint16_t)v; std::memcpy(&bytes[2 * i], &w, 2); }
+        else std::memcpy(&bytes[4 * i], &v, 4);
+    }
+    int bytesPorIndice() const { return ancho; }
+    class Iterador {
+    public:
+        Iterador(const SecuenciaIds* s, size_t i) : s(s), i(i) {}
+        uint32_t operator*() const { return (*s)[i]; }
+        Iterador& operator++() { ++i; return *this; }
+        bool operator!=(const Iterador& o) const { return i != o.i; }
+    private:
+        const SecuenciaIds* s;
+        size_t i;
+    };
+    Iterador begin() const { return Iterador(this, 0); }
+    Iterador end() const { return Iterador(this, tam); }
+
+private:
+    std::vector<uint8_t> bytes;
+    size_t tam = 0;
+    int ancho = 4;
+};
 
 // Fuente discreta: el archivo visto como una secuencia de símbolos de N bits
 struct Fuente {
@@ -14,7 +60,7 @@ struct Fuente {
     size_t bytesPorSimbolo = 1;
     uint64_t tamanoOriginal = 0;          // bytes reales del archivo
     std::vector<unsigned char> datos;     // contenido rellenado con ceros hasta un múltiplo de N bits
-    std::vector<uint32_t> ids;            // secuencia de símbolos (índice en el alfabeto)
+    SecuenciaIds ids;                     // secuencia de símbolos (índice en el alfabeto)
     std::vector<uint64_t> primerBloque;   // bloque donde aparece por primera vez cada símbolo
     std::vector<uint64_t> frecuencias;    // ocurrencias de cada símbolo del alfabeto
 
